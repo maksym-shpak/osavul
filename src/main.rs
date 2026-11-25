@@ -1,4 +1,6 @@
 mod empty_rust_test;
+#[cfg(test)]
+mod ts_cyclomatic;
 
 use std::env;
 use std::ffi::OsString;
