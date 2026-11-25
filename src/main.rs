@@ -1,12 +1,6 @@
 mod empty_rust_test;
-// Модулі complexity підключаються до бінарника разом із командою.
-#[cfg(test)]
-#[allow(dead_code)]
 mod complexity_report;
-#[cfg(test)]
-#[allow(dead_code)]
 mod git_tree;
-#[cfg(test)]
 mod ts_cyclomatic;
 
 use std::env;
@@ -22,7 +16,12 @@ osavul — статичний аналізатор коду
   osavul --version    показати назву й версію
   osavul check <файл.rs>
                       знайти порожні Rust-тести (правило empty-rust-test)
+  osavul complexity <ревізія>
+                      цикломатична складність файлів .ts коміту (JSON у stdout);
+                      потрібен локальний Git, запуск усередині репозиторію
 
+Коди завершення complexity: 0 — повний звіт, 1 — неповний звіт (JSON усе одно
+у stdout), 2 — помилка аргументів, Git, коміту чи інвентарю (stdout порожній).
 Коди завершення check: 0 — знахідок немає, 1 — є знахідки, 2 — помилка.
 ";
 
@@ -42,7 +41,24 @@ fn main() -> ExitCode {
             Some(path) => check(path),
             None => usage_error(),
         },
+        [c, rev] if c == "complexity" => match rev.to_str() {
+            Some(rev) => complexity(rev),
+            None => usage_error(),
+        },
         _ => usage_error(),
+    }
+}
+
+fn complexity(rev: &str) -> ExitCode {
+    match complexity_report::measure(rev) {
+        Ok(report) => {
+            let _ = std::io::stdout().write_all(&report.json);
+            ExitCode::from(u8::from(!report.complete))
+        }
+        Err(reason) => {
+            let _ = writeln!(std::io::stderr(), "osavul: {reason}");
+            ExitCode::from(2)
+        }
     }
 }
 

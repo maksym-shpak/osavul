@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn run(args: &[&str]) -> Output {
@@ -34,6 +34,8 @@ fn help_is_stable_and_lists_all_invocations() {
     let text = String::from_utf8(first.stdout.clone()).unwrap();
     assert!(text.contains("--help") && text.contains("--version"));
     assert!(text.contains("check <файл.rs>"));
+    assert!(text.contains("osavul complexity <ревізія>"));
+    assert!(text.contains("Коди завершення complexity"));
     assert_eq!(first.stdout, second.stdout);
 }
 
@@ -60,6 +62,12 @@ fn check_without_path_is_usage_error() {
 fn extra_argument_is_usage_error() {
     assert_usage_error(&["--version", "extra"]);
     assert_usage_error(&["check", "a.rs", "extra"]);
+    assert_usage_error(&["complexity", "HEAD", "extra"]);
+}
+
+#[test]
+fn complexity_without_revision_is_usage_error() {
+    assert_usage_error(&["complexity"]);
 }
 
 fn temp_file(name: &str, content: &[u8]) -> PathBuf {
@@ -210,4 +218,279 @@ fn read_errors_exit_with_two() {
     assert_check_error(&["check", "tests/fixtures/no-such-file.rs"]);
     let path = temp_file("bad_utf8.rs", &[0xff, 0xfe, b'f']);
     assert_check_error(&["check", path.to_str().unwrap()]);
+}
+
+// ---- complexity: Git-межа ----
+
+const FIXTURES: &str = "tests/fixtures/ts-cyclomatic";
+
+fn isolate(cmd: &mut Command, home: &Path) {
+    for (k, _) in std::env::vars_os() {
+        if k.to_str().is_some_and(|k| k.starts_with("GIT_")) {
+            cmd.env_remove(k);
+        }
+    }
+    cmd.env("HOME", home)
+        .env("XDG_CONFIG_HOME", home)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "T")
+        .env("GIT_AUTHOR_EMAIL", "t@example.com")
+        .env("GIT_COMMITTER_NAME", "T")
+        .env("GIT_COMMITTER_EMAIL", "t@example.com")
+        .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z");
+}
+
+struct Repo {
+    root: PathBuf,
+    home: PathBuf,
+}
+
+impl Repo {
+    fn new(name: &str) -> Repo {
+        let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("cx-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let root = base.join("repo");
+        let home = base.join("home");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        let repo = Repo { root, home };
+        repo.git(&["init", "-q", "-b", "main"]);
+        repo
+    }
+
+    fn git(&self, args: &[&str]) -> String {
+        let mut cmd = Command::new("git");
+        cmd.args(args).current_dir(&self.root);
+        isolate(&mut cmd, &self.home);
+        let out = cmd.output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    fn write(&self, path: &str, content: &[u8]) {
+        let full = self.root.join(path);
+        fs::create_dir_all(full.parent().unwrap()).unwrap();
+        fs::write(full, content).unwrap();
+    }
+
+    fn commit(&self, msg: &str) -> String {
+        self.git(&["add", "-A"]);
+        self.git(&["commit", "-q", "-m", msg]);
+        self.git(&["rev-parse", "HEAD"])
+    }
+
+    fn run(&self, dir: &Path, args: &[&str]) -> Output {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
+        cmd.args(args).current_dir(dir);
+        isolate(&mut cmd, &self.home);
+        cmd.output().unwrap()
+    }
+
+    fn complexity(&self, rev: &str) -> Output {
+        self.run(&self.root, &["complexity", rev])
+    }
+
+    fn loose_object(&self, oid: &str) -> PathBuf {
+        self.root.join(".git/objects").join(&oid[..2]).join(&oid[2..])
+    }
+}
+
+fn json_of(out: &Output) -> serde_json::Value {
+    assert!(out.stdout.ends_with(b"\n"));
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+fn pairs(v: &serde_json::Value) -> Vec<(String, serde_json::Value)> {
+    v["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| (f["path"].as_str().unwrap().to_string(), f["cyclomatic"].clone()))
+        .collect()
+}
+
+const IF_ELSE: &str = "export function f(x: number) { if (x) { return 1; } else { return 2; } }\n";
+
+#[test]
+fn corpus_pair_matches_expected_scores_through_cli() {
+    let repo = Repo::new("corpus");
+    let tsv = fs::read_to_string(format!("{FIXTURES}/expected.tsv")).unwrap();
+    let mut rows = tsv.lines();
+    assert_eq!(rows.next(), Some("path\tpair\tcyclomatic"));
+    let mut expected = Vec::new();
+    for row in rows {
+        let f: Vec<&str> = row.split('\t').collect();
+        repo.write(f[0], &fs::read(format!("{FIXTURES}/{}", f[0])).unwrap());
+        expected.push((f[0].to_string(), serde_json::json!(f[2].parse::<u64>().unwrap())));
+    }
+    assert_eq!(expected.len(), 2);
+    expected.sort_by(|a, b| a.0.cmp(&b.0));
+    let sha = repo.commit("corpus");
+    let first = repo.complexity(&sha);
+    let second = repo.complexity(&sha);
+    for out in [&first, &second] {
+        assert_eq!(out.status.code(), Some(0));
+        assert!(out.stderr.is_empty());
+    }
+    assert_eq!(first.stdout, second.stdout);
+    let v = json_of(&first);
+    assert_eq!(pairs(&v), expected);
+    assert_eq!(v["total"], 3);
+    assert_eq!(v["complete"], true);
+    assert_eq!(v["sha"], sha.as_str());
+}
+
+#[test]
+fn old_commit_inventory_ignores_later_and_local_changes() {
+    let repo = Repo::new("inventory");
+    repo.write("a.ts", IF_ELSE.as_bytes());
+    repo.write("dir/a.ts", IF_ELSE.as_bytes());
+    repo.write("src/deep/x.test.ts", b"function t() { return 1; }\n");
+    repo.write("types.d.ts", b"export declare function g(): void;\n");
+    repo.write("run.ts", b"function r() { return 1; }\n");
+    for skipped in ["U.TS", "x.tsx", "x.mts", "x.cts"] {
+        repo.write(skipped, IF_ELSE.as_bytes());
+    }
+    std::os::unix::fs::symlink("a.ts", repo.root.join("link.ts")).unwrap();
+    repo.git(&["update-index", "--add", "--cacheinfo", "160000,1111111111111111111111111111111111111111,sub.ts"]);
+    repo.git(&["add", "-A"]);
+    repo.git(&["update-index", "--chmod=+x", "run.ts"]);
+    repo.git(&["commit", "-q", "-m", "one"]);
+    let old = repo.git(&["rev-parse", "HEAD"]);
+
+    repo.write("a.ts", b"const changed = 1;\n");
+    repo.write("later.ts", b"function l() {}\n");
+    repo.commit("two");
+    repo.write("a.ts", b"function staged() {}\n");
+    repo.git(&["add", "a.ts"]);
+    repo.write("a.ts", b"function worktree() {}\n");
+    repo.write("untracked.ts", b"function u() {}\n");
+
+    let expected = vec![
+        ("a.ts", 2),
+        ("dir/a.ts", 2),
+        ("run.ts", 1),
+        ("src/deep/x.test.ts", 1),
+        ("types.d.ts", 0),
+    ];
+    let expected: Vec<(String, serde_json::Value)> =
+        expected.into_iter().map(|(p, n)| (p.to_string(), serde_json::json!(n))).collect();
+    // Різні форми ревізії, запуск із підкаталогу.
+    for rev in [old.as_str(), &old[..10], "main~1"] {
+        let out = repo.run(&repo.root.join("src/deep"), &["complexity", rev]);
+        assert_eq!(out.status.code(), Some(0), "{rev}");
+        assert!(out.stderr.is_empty());
+        let v = json_of(&out);
+        assert_eq!(v["sha"], old.as_str());
+        assert_eq!(pairs(&v), expected, "{rev}");
+        assert_eq!(v["total"], 6);
+    }
+}
+
+#[test]
+fn per_file_failures_keep_other_files_and_are_reproducible() {
+    let repo = Repo::new("failures");
+    repo.write("a_zero.ts", b"export const z = 1;\n");
+    repo.write("b_syntax.ts", b"function (\n");
+    repo.write("c_utf8.ts", &[0xff, 0xfe, b'x']);
+    repo.write("d_ok.ts", b"function f() { return 1; }\n");
+    let sha = repo.commit("mixed");
+    let first = repo.complexity(&sha);
+    let second = repo.complexity(&sha);
+    for out in [&first, &second] {
+        assert_eq!(out.status.code(), Some(1));
+        assert!(out.stderr.is_empty());
+    }
+    assert_eq!(first.stdout, second.stdout);
+    let v = json_of(&first);
+    assert_eq!(v["complete"], false);
+    assert!(v["total"].is_null());
+    let files = v["files"].as_array().unwrap();
+    assert_eq!(files[0]["cyclomatic"], 0);
+    assert!(files[0].get("error").is_none());
+    assert!(files[1]["cyclomatic"].is_null());
+    assert_eq!(files[1]["error"], "syntax-error");
+    assert!(files[2]["cyclomatic"].is_null());
+    assert_ne!(files[2]["error"], files[1]["error"]);
+    assert_eq!(files[3]["cyclomatic"], 1);
+}
+
+#[test]
+fn unreadable_blob_keeps_path_and_later_objects_are_still_scored() {
+    let repo = Repo::new("blob");
+    repo.write("a.ts", b"function a() { return 1; }\n");
+    repo.write("b.ts", b"function b() { return 2; }\n");
+    repo.write("c.ts", b"function c() { if (1) { return 3; } }\n");
+    let sha = repo.commit("three");
+    let oid = repo.git(&["rev-parse", "HEAD:b.ts"]);
+    let obj = repo.loose_object(&oid);
+    let mut perm = fs::metadata(&obj).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o644);
+    fs::set_permissions(&obj, perm).unwrap();
+    fs::write(&obj, b"not a zlib stream").unwrap();
+
+    let first = repo.complexity(&sha);
+    let second = repo.complexity(&sha);
+    for out in [&first, &second] {
+        assert_eq!(out.status.code(), Some(1));
+        assert!(out.stderr.is_empty());
+    }
+    assert_eq!(first.stdout, second.stdout);
+    let v = json_of(&first);
+    assert_eq!(v["complete"], false);
+    assert!(v["total"].is_null());
+    let files = v["files"].as_array().unwrap();
+    assert_eq!(files[0]["cyclomatic"], 1);
+    assert_eq!(files[1]["path"], "b.ts");
+    assert!(files[1]["cyclomatic"].is_null());
+    assert_eq!(files[1]["error"], "read-error");
+    assert_eq!(files[2]["cyclomatic"], 2);
+}
+
+#[test]
+fn unreadable_tree_is_fatal() {
+    let repo = Repo::new("tree");
+    repo.write("a.ts", b"function a() {}\n");
+    let sha = repo.commit("one");
+    let tree = repo.git(&["rev-parse", "HEAD^{tree}"]);
+    let obj = repo.loose_object(&tree);
+    let mut perm = fs::metadata(&obj).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o644);
+    fs::set_permissions(&obj, perm).unwrap();
+    fs::remove_file(&obj).unwrap();
+    let out = repo.complexity(&sha);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    assert!(!out.stderr.is_empty());
+}
+
+#[test]
+fn unknown_revision_outside_repository_and_missing_git_are_fatal() {
+    let repo = Repo::new("fatal");
+    repo.write("a.ts", b"function a() {}\n");
+    repo.commit("one");
+    let unknown = repo.complexity("no-such-rev");
+    let outside = {
+        let dir = repo.home.join("outside");
+        fs::create_dir_all(&dir).unwrap();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
+        cmd.args(["complexity", "HEAD"]).current_dir(&dir);
+        isolate(&mut cmd, &repo.home);
+        cmd.env("GIT_CEILING_DIRECTORIES", &repo.home);
+        cmd.output().unwrap()
+    };
+    let no_git = {
+        let empty = repo.home.join("empty-path");
+        fs::create_dir_all(&empty).unwrap();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
+        cmd.args(["complexity", "HEAD"]).current_dir(&repo.root).env("PATH", &empty);
+        cmd.output().unwrap()
+    };
+    for out in [&unknown, &outside, &no_git] {
+        assert_eq!(out.status.code(), Some(2));
+        assert!(out.stdout.is_empty());
+        assert!(!out.stderr.is_empty());
+    }
 }
