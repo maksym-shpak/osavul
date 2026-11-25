@@ -603,7 +603,18 @@ fn stdout_write_failure_is_fatal() {
 }
 
 fn local_dir(name: &str) -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("loc-{}-{name}", std::process::id()));
+    // Від root дочірній процес з UID 65534 має пройти шлях до теки, а приватний
+    // каталог checkout (0700) цього не дозволяє, тож фікстури лежать у /tmp.
+    let base = if is_root() {
+        PathBuf::from("/tmp").join(format!("osavul-local-{}", std::process::id()))
+    } else {
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+    };
+    fs::create_dir_all(&base).unwrap();
+    if is_root() {
+        set_mode(&base, 0o755);
+    }
+    let dir = base.join(format!("loc-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     set_mode(&dir, 0o755);
@@ -619,7 +630,16 @@ fn set_mode(path: &Path, mode: u32) {
 fn local_run(dir: &Path, args: &[&str], restricted: bool) -> Output {
     let empty = dir.parent().unwrap().join("empty-path");
     fs::create_dir_all(&empty).unwrap();
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
+    let mut bin = PathBuf::from(env!("CARGO_BIN_EXE_osavul"));
+    if restricted && is_root() {
+        // Бінарник теж може лежати під приватним каталогом: копіюємо в доступне місце.
+        let copy = dir.parent().unwrap().join("osavul-bin");
+        fs::copy(&bin, &copy).unwrap();
+        set_mode(&copy, 0o755);
+        set_mode(&empty, 0o755);
+        bin = copy;
+    }
+    let mut cmd = Command::new(bin);
     cmd.args(args).current_dir(dir).env("PATH", &empty);
     if restricted && is_root() {
         std::os::unix::process::CommandExt::uid(&mut cmd, 65534);
