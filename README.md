@@ -77,8 +77,7 @@ osavul complexity <ревізія>
 `0` — повний звіт, `1` — неповний звіт (JSON усе одно у stdout, `total` — `null`),
 `2` — помилка аргументів, Git, коміту чи інвентарю (stdout порожній, причина в
 stderr). Правила підрахунку й контракт звіту — у
-[Звіті складності](docs/domain/entities/complexity-report.md); пофайлова звірка з
-SonarQube — у [датованому вимірі](docs/measurements/2026-11-25-typescript-complexity.md).
+[Звіті складності](docs/domain/entities/complexity-report.md).
 
 ## Документація
 
