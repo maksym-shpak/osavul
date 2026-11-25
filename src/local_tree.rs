@@ -1,4 +1,3 @@
-//! Відбір і читання `.ts`-файлів із локальної файлової системи.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,7 +11,6 @@ pub enum InputKind {
     Directory,
 }
 
-/// Відібраний файл: звітний ключ (байти) і шлях для читання з диска.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Selected {
     pub key: Vec<u8>,
