@@ -220,7 +220,6 @@ fn read_errors_exit_with_two() {
     assert_check_error(&["check", path.to_str().unwrap()]);
 }
 
-// ---- complexity: Git-межа ----
 
 const FIXTURES: &str = "tests/fixtures/ts-cyclomatic";
 
@@ -377,7 +376,6 @@ fn old_commit_inventory_ignores_later_and_local_changes() {
     ];
     let expected: Vec<(String, serde_json::Value)> =
         expected.into_iter().map(|(p, n)| (p.to_string(), serde_json::json!(n))).collect();
-    // Різні форми ревізії, запуск із підкаталогу.
     for rev in [old.as_str(), &old[..10], "main~1"] {
         let out = repo.run(&repo.root.join("src/deep"), &["complexity", rev]);
         assert_eq!(out.status.code(), Some(0), "{rev}");
