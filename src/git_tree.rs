@@ -31,6 +31,8 @@ fn git() -> Command {
     let mut cmd = Command::new("git");
     // Підміна об'єктів (refs/replace) не повинна змінювати виміряний коміт.
     cmd.arg("--no-replace-objects").env("GIT_NO_REPLACE_OBJECTS", "1");
+    // У частковому клоні відсутній об'єкт має бути помилкою читання, а не мережевим довантаженням.
+    cmd.env("GIT_NO_LAZY_FETCH", "1");
     cmd
 }
 
@@ -50,20 +52,47 @@ fn run(mut cmd: Command, what: &str) -> Result<Vec<u8>, String> {
 /// Розв'язує ревізію до повного SHA коміту й повертає впорядкований інвентар
 /// звичайних файлів `.ts` від кореня дерева цього коміту.
 pub fn inventory(rev: &str) -> Result<Inventory, String> {
-    let mut cmd = git();
-    cmd.args(["rev-parse", "--verify", "--end-of-options"])
-        .arg(format!("{rev}^{{commit}}"));
-    let out = run(cmd, &format!("не вдалося розв'язати коміт {rev}"))?;
-    let sha = String::from_utf8_lossy(&out).trim().to_string();
-    if sha.is_empty() {
-        return Err(format!("не вдалося розв'язати коміт {rev}"));
-    }
+    let sha = resolve_commit(rev)?;
 
     let mut cmd = git();
     cmd.args(["ls-tree", "-r", "-z", "--full-tree", &sha]);
     let listing = run(cmd, &format!("не вдалося прочитати дерево коміту {sha}"))?;
     let entries = parse_listing(&listing)?;
     Ok(Inventory { sha, entries })
+}
+
+/// Розв'язує ревізію як окремий аргумент Git без переписування виразу. Неоднозначні імена
+/// відхиляються: Git лише попереджає про них і обирає одну з цілей, а `-c` перекриває
+/// користувацьке вимкнення попередження.
+fn resolve_commit(rev: &str) -> Result<String, String> {
+    let fail = |msg: &str| format!("не вдалося розв'язати коміт {rev}: {msg}");
+    let out = git()
+        .args(["-c", "core.warnAmbiguousRefs=true", "rev-parse", "--verify", "--end-of-options"])
+        .arg(rev)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("не вдалося запустити git: {e}"))?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        return Err(fail(stderr.trim()));
+    }
+    if stderr.contains("ambiguous") {
+        return Err(fail(&format!("ревізія неоднозначна ({})", stderr.trim())));
+    }
+    let object = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if object.is_empty() {
+        return Err(fail("порожня відповідь"));
+    }
+    // Розіменування за вже зафіксованим ідентифікатором: тег -> коміт, інші типи відхиляються.
+    let mut cmd = git();
+    cmd.args(["rev-parse", "--verify", "--end-of-options"])
+        .arg(format!("{object}^{{commit}}"));
+    let out = run(cmd, &format!("не вдалося розв'язати коміт {rev}"))?;
+    let sha = String::from_utf8_lossy(&out).trim().to_string();
+    if sha.is_empty() {
+        return Err(fail("порожня відповідь"));
+    }
+    Ok(sha)
 }
 
 fn parse_listing(listing: &[u8]) -> Result<Vec<Entry>, String> {

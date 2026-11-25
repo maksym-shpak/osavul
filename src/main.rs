@@ -52,7 +52,11 @@ fn main() -> ExitCode {
 fn complexity(rev: &str) -> ExitCode {
     match complexity_report::measure(rev) {
         Ok(report) => {
-            let _ = std::io::stdout().write_all(&report.json);
+            let mut stdout = std::io::stdout().lock();
+            if let Err(e) = stdout.write_all(&report.json).and_then(|()| stdout.flush()) {
+                let _ = writeln!(std::io::stderr(), "osavul: не вдалося записати звіт: {e}");
+                return ExitCode::from(2);
+            }
             ExitCode::from(u8::from(!report.complete))
         }
         Err(reason) => {

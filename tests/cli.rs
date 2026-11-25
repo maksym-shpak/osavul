@@ -472,6 +472,17 @@ fn unknown_revision_outside_repository_and_missing_git_are_fatal() {
     repo.write("a.ts", b"function a() {}\n");
     repo.commit("one");
     let unknown = repo.complexity("no-such-rev");
+    repo.write("b.ts", b"function b() {}\n");
+    let second = repo.commit("first release");
+    repo.git(&["tag", "release", "HEAD~1"]);
+    repo.git(&["branch", "release", "HEAD"]);
+    let ambiguous = repo.complexity("release");
+    // Вираз пошуку за повідомленням Git розв'язує однозначно.
+    let by_message = repo.complexity(":/first release");
+    assert_eq!(by_message.status.code(), Some(0));
+    assert_eq!(json_of(&by_message)["sha"], second.as_str());
+    assert_eq!(json_of(&repo.complexity("refs/heads/release"))["sha"], second.as_str());
+    assert_eq!(json_of(&repo.complexity("refs/tags/release"))["sha"], repo.git(&["rev-parse", "HEAD~1"]).as_str());
     let outside = {
         let dir = repo.home.join("outside");
         fs::create_dir_all(&dir).unwrap();
@@ -488,9 +499,52 @@ fn unknown_revision_outside_repository_and_missing_git_are_fatal() {
         cmd.args(["complexity", "HEAD"]).current_dir(&repo.root).env("PATH", &empty);
         cmd.output().unwrap()
     };
-    for out in [&unknown, &outside, &no_git] {
+    for out in [&unknown, &ambiguous, &outside, &no_git] {
         assert_eq!(out.status.code(), Some(2));
         assert!(out.stdout.is_empty());
         assert!(!out.stderr.is_empty());
     }
+}
+
+#[test]
+fn partial_clone_does_not_fetch_missing_blobs() {
+    let source = Repo::new("partial-src");
+    source.write("a.ts", b"function a() {}\n");
+    source.commit("one");
+    source.git(&["config", "uploadpack.allowFilter", "true"]);
+    let clone = source.home.join("clone");
+    let mut cmd = Command::new("git");
+    cmd.args(["clone", "-q", "--filter=blob:none", "--no-checkout"])
+        .arg(format!("file://{}", source.root.display()))
+        .arg(&clone);
+    isolate(&mut cmd, &source.home);
+    let out = cmd.output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let out = source.run(&clone, &["complexity", "HEAD"]);
+    assert_eq!(out.status.code(), Some(1));
+    let v = json_of(&out);
+    assert_eq!(v["files"][0]["error"], "read-error");
+    assert!(v["total"].is_null());
+    let mut cmd = Command::new("git");
+    cmd.args(["rev-list", "--objects", "--missing=print", "HEAD"]).current_dir(&clone);
+    isolate(&mut cmd, &source.home);
+    cmd.env("GIT_NO_LAZY_FETCH", "1");
+    let listing = String::from_utf8(cmd.output().unwrap().stdout).unwrap();
+    assert!(listing.lines().any(|l| l.starts_with('?')), "blob must stay missing: {listing}");
+}
+
+#[test]
+fn stdout_write_failure_is_fatal() {
+    let repo = Repo::new("full");
+    repo.write("a.ts", b"function a() {}\n");
+    repo.commit("one");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
+    cmd.args(["complexity", "HEAD"])
+        .current_dir(&repo.root)
+        .stdout(fs::OpenOptions::new().write(true).open("/dev/full").unwrap());
+    isolate(&mut cmd, &repo.home);
+    let out = cmd.output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(!out.stderr.is_empty());
 }

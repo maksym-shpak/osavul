@@ -8,7 +8,7 @@ use oxc_ast::ast::{
     WhileStatement,
 };
 use oxc_ast_visit::{Visit, walk};
-use oxc_parser::Parser;
+use oxc_parser::{ParseOptions, Parser};
 use oxc_span::SourceType;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -37,7 +37,12 @@ pub fn score(path: &[u8], content: &[u8]) -> Result<u64, ScoreError> {
         SourceType::ts()
     };
     let allocator = Allocator::default();
-    let ret = Parser::new(&allocator, text, source_type).parse();
+    let ret = Parser::new(&allocator, text, source_type)
+        .with_options(ParseOptions {
+            parse_regular_expression: true,
+            ..ParseOptions::default()
+        })
+        .parse();
     // Відновлене дерево з діагностикою теж є помилкою.
     if !ret.diagnostics.is_empty() {
         return Err(ScoreError::Syntax);
@@ -214,6 +219,11 @@ mod tests {
         let syntax = score(b"a.ts", b"function (").unwrap_err();
         assert_eq!(syntax, ScoreError::Syntax);
         assert_ne!(invalid.reason(), syntax.reason());
+        // Тіло регулярного виразу розбирається лише за явного параметра.
+        assert_eq!(
+            score(b"a.ts", b"export const re = /(/;").unwrap_err(),
+            ScoreError::Syntax
+        );
     }
 
     #[test]
