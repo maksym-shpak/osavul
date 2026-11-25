@@ -1,4 +1,11 @@
 mod empty_rust_test;
+// Модулі complexity підключаються до бінарника разом із командою.
+#[cfg(test)]
+#[allow(dead_code)]
+mod complexity_report;
+#[cfg(test)]
+#[allow(dead_code)]
+mod git_tree;
 #[cfg(test)]
 mod ts_cyclomatic;
 
