@@ -1,4 +1,7 @@
 mod empty_rust_test;
+mod complexity_report;
+mod git_tree;
+mod ts_cyclomatic;
 
 use std::env;
 use std::ffi::OsString;
@@ -13,7 +16,12 @@ osavul — статичний аналізатор коду
   osavul --version    показати назву й версію
   osavul check <файл.rs>
                       знайти порожні Rust-тести (правило empty-rust-test)
+  osavul complexity <ревізія>
+                      цикломатична складність файлів .ts коміту (JSON у stdout);
+                      потрібен локальний Git, запуск усередині репозиторію
 
+Коди завершення complexity: 0 — повний звіт, 1 — неповний звіт (JSON усе одно
+у stdout), 2 — помилка аргументів, Git, коміту чи інвентарю (stdout порожній).
 Коди завершення check: 0 — знахідок немає, 1 — є знахідки, 2 — помилка.
 ";
 
@@ -33,7 +41,28 @@ fn main() -> ExitCode {
             Some(path) => check(path),
             None => usage_error(),
         },
+        [c, rev] if c == "complexity" => match rev.to_str() {
+            Some(rev) => complexity(rev),
+            None => usage_error(),
+        },
         _ => usage_error(),
+    }
+}
+
+fn complexity(rev: &str) -> ExitCode {
+    match complexity_report::measure(rev) {
+        Ok(report) => {
+            let mut stdout = std::io::stdout().lock();
+            if let Err(e) = stdout.write_all(&report.json).and_then(|()| stdout.flush()) {
+                let _ = writeln!(std::io::stderr(), "osavul: не вдалося записати звіт: {e}");
+                return ExitCode::from(2);
+            }
+            ExitCode::from(u8::from(!report.complete))
+        }
+        Err(reason) => {
+            let _ = writeln!(std::io::stderr(), "osavul: {reason}");
+            ExitCode::from(2)
+        }
     }
 }
 

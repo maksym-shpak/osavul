@@ -1,0 +1,3 @@
+path	pair	cyclomatic
+straight.ts	branch	1
+branch.ts	branch	2
