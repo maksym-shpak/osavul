@@ -61,12 +61,51 @@ struct Token {
     line: usize,
 }
 
+// Текст уже пройшов розбір rustc, тому поза літералами й коментарями будь-який
+// не-ASCII символ, що не є пробілом, належить ідентифікатору (XID без таблиць Unicode).
+fn is_pattern_ws(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '\u{200e}' | '\u{200f}')
+}
+
 fn is_ident_start(c: char) -> bool {
-    c == '_' || c.is_alphabetic()
+    c == '_' || c.is_ascii_alphabetic() || (!c.is_ascii() && !is_pattern_ws(c))
 }
 
 fn is_ident_continue(c: char) -> bool {
-    c == '_' || c.is_alphanumeric()
+    c == '_' || c.is_ascii_alphanumeric() || (!c.is_ascii() && !is_pattern_ws(c))
+}
+
+/// Після `#!` пропускає пробіли та звичайні коментарі (через рядки) й повертає позицію
+/// наступного значущого символа.
+fn skip_trivia(c: &[char], mut j: usize) -> usize {
+    loop {
+        match (c.get(j), c.get(j + 1)) {
+            (Some(&x), _) if is_pattern_ws(x) => j += 1,
+            (Some('/'), Some('/')) => {
+                while j < c.len() && c[j] != '\n' {
+                    j += 1;
+                }
+            }
+            (Some('/'), Some('*')) => {
+                let mut depth = 0;
+                while j < c.len() {
+                    if c[j] == '/' && c.get(j + 1) == Some(&'*') {
+                        depth += 1;
+                        j += 2;
+                    } else if c[j] == '*' && c.get(j + 1) == Some(&'/') {
+                        depth -= 1;
+                        j += 2;
+                        if depth == 0 {
+                            break;
+                        }
+                    } else {
+                        j += 1;
+                    }
+                }
+            }
+            _ => return j,
+        }
+    }
 }
 
 fn lex(src: &str) -> Result<Vec<Token>, String> {
@@ -77,11 +116,7 @@ fn lex(src: &str) -> Result<Vec<Token>, String> {
     let mut out = Vec::new();
     if c.starts_with(&['#', '!']) {
         // Shebang, якщо далі не атрибут `#![`.
-        let mut j = 2;
-        while j < n && c[j].is_whitespace() && c[j] != '\n' {
-            j += 1;
-        }
-        if c.get(j) != Some(&'[') {
+        if c.get(skip_trivia(&c, 2)) != Some(&'[') {
             while i < n && c[i] != '\n' {
                 i += 1;
             }
@@ -358,6 +393,16 @@ fn walk_items(tokens: &[Token], close_of: &[usize], mut i: usize, end: usize, fo
             let mut body = None;
             while j < end {
                 match &tokens[j].kind {
+                    // `m! { .. }` у типі повернення — не тіло; `-> ! {` — тіло.
+                    Kind::Open('{')
+                        if depth == 0
+                            && j >= 2
+                            && tokens[j - 1].kind == Kind::Punct('!')
+                            && matches!(tokens[j - 2].kind, Kind::Ident(_)) =>
+                    {
+                        j = close_of[j] + 1;
+                        continue;
+                    }
                     Kind::Open('{') if depth == 0 => {
                         body = Some(j);
                         break;

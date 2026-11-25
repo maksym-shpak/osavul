@@ -3,10 +3,16 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_osavul"))
-        .args(args)
-        .output()
-        .expect("не вдалося запустити osavul")
+    run_in(None, args)
+}
+
+fn run_in(dir: Option<&std::path::Path>, args: &[&str]) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
+    cmd.args(args);
+    if let Some(d) = dir {
+        cmd.current_dir(d);
+    }
+    cmd.output().expect("не вдалося запустити osavul")
 }
 
 fn assert_usage_error(args: &[&str]) {
@@ -114,8 +120,9 @@ fn corpus_matches_expected_tsv() {
 fn two_findings_in_order_with_crlf_and_multiline_attribute() {
     let src = "// c\r\n#[test]\r\nfn a() {}\r\n\r\n#[\r\n  test\r\n]\r\n/* x\r\n*/ pub(crate)\r\nfn b() { /* a /* nested */ b */ // t\r\n}\r\n";
     let path = temp_file("any_name.txt", src.as_bytes());
-    let p = format!("./{}", path.strip_prefix(env!("CARGO_MANIFEST_DIR")).unwrap().display());
-    let out = run(&["check", &p]);
+    // Робочий каталог — тимчасовий, тож тест не залежить від розміщення CARGO_TARGET_DIR.
+    let p = format!("./{}", path.file_name().unwrap().to_str().unwrap());
+    let out = run_in(path.parent(), &["check", &p]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(out.stdout, format!("{p}:3: empty-rust-test\n{p}:10: empty-rust-test\n").as_bytes());
     assert!(out.stderr.is_empty());
@@ -168,6 +175,21 @@ fn extra_attributes_and_non_empty_bodies_do_not_match() {
         "fn helper() {}\n#[test]\nfn a() { helper(); }",
     ] {
         assert_eq!(check_src("attrs.rs", item), (0, String::new()), "{item}");
+    }
+}
+
+#[test]
+fn signature_macros_and_unicode_names_and_multiline_inner_attribute() {
+    let cases = [
+        ("#[test]\nfn a() -> unit! {} { helper() }", (0, "")),
+        ("#[test]\nfn a() -> as_type! { () } {}", (1, "P:2: empty-rust-test\n")),
+        ("#[test]\nfn a() -> ! {}", (1, "P:2: empty-rust-test\n")),
+        ("mod परीक्षा {\n#[test]\nfn a() {}\n}", (1, "P:3: empty-rust-test\n")),
+        ("#!\n[allow(dead_code)]\n#[test]\nfn a() {}\n", (1, "P:4: empty-rust-test\n")),
+        ("#! /* c */\n// d\n[allow(dead_code)]\n#[test]\nfn a() {}\n", (1, "P:5: empty-rust-test\n")),
+    ];
+    for (src, (code, out)) in cases {
+        assert_eq!(check_src("sig.rs", src), (code, out.to_string()), "{src}");
     }
 }
 
