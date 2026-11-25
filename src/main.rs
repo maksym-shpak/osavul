@@ -1,6 +1,7 @@
 mod empty_rust_test;
 mod complexity_report;
 mod git_tree;
+mod local_tree;
 mod ts_cyclomatic;
 
 use std::env;
@@ -18,10 +19,14 @@ osavul — статичний аналізатор коду
                       знайти порожні Rust-тести (правило empty-rust-test)
   osavul complexity <ревізія>
                       цикломатична складність файлів .ts коміту (JSON у stdout);
-                      потрібен локальний Git, запуск усередині репозиторію
+                      вміст береться з коміту, потрібен локальний Git і запуск
+                      усередині репозиторію
+  osavul complexity --path <файл-або-тека>
+                      те саме для поточного вмісту файла .ts або теки на диску
+                      (зокрема незакомічених змін); Git не потрібен
 
 Коди завершення complexity: 0 — повний звіт, 1 — неповний звіт (JSON усе одно
-у stdout), 2 — помилка аргументів, Git, коміту чи інвентарю (stdout порожній).
+у stdout), 2 — помилка аргументів, Git, коміту, шляху чи обходу (stdout порожній).
 Коди завершення check: 0 — знахідок немає, 1 — є знахідки, 2 — помилка.
 ";
 
@@ -41,16 +46,20 @@ fn main() -> ExitCode {
             Some(path) => check(path),
             None => usage_error(),
         },
+        [c, flag, path] if c == "complexity" && flag == "--path" => {
+            emit(complexity_report::measure_local(std::path::Path::new(path)))
+        }
+        // Один операнд — завжди ревізія, навіть якщо він схожий на прапорець.
         [c, rev] if c == "complexity" => match rev.to_str() {
-            Some(rev) => complexity(rev),
+            Some(rev) => emit(complexity_report::measure(rev)),
             None => usage_error(),
         },
         _ => usage_error(),
     }
 }
 
-fn complexity(rev: &str) -> ExitCode {
-    match complexity_report::measure(rev) {
+fn emit(result: Result<complexity_report::Report, String>) -> ExitCode {
+    match result {
         Ok(report) => {
             let mut stdout = std::io::stdout().lock();
             if let Err(e) = stdout.write_all(&report.json).and_then(|()| stdout.flush()) {
