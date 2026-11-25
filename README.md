@@ -98,6 +98,7 @@ JSON у stdout), `2` — відсутній шлях, явний файл не `
 
 - [Індекс домену](docs/domain/core-entities.md) — карта понять і значення результату.
 - [Огляд потоку даних](docs/architecture/overview.md) — шлях файла від команди до результату.
+- [Звірка із SonarQube](docs/measurements/2026-11-25-ts-cyclomatic-vs-sonarqube.md) — вимір цикломатичної складності `.ts` Осавула і SonarQube на двох SHA Руни.
 
 ## Чим це відрізняється
 
