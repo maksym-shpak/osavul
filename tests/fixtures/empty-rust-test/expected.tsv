@@ -1,0 +1,7 @@
+path	pair	lines
+empty_body_finding.rs	empty-body	[6]
+empty_body_clean.rs	empty-body	[]
+comment_only_finding.rs	comment-only	[10]
+comment_only_clean.rs	comment-only	[]
+no_test_attr_finding.rs	no-test-attr	[2]
+no_test_attr_clean.rs	no-test-attr	[]
