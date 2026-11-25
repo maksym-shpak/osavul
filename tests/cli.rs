@@ -35,6 +35,8 @@ fn help_is_stable_and_lists_all_invocations() {
     assert!(text.contains("--help") && text.contains("--version"));
     assert!(text.contains("check <файл.rs>"));
     assert!(text.contains("osavul complexity <ревізія>"));
+    assert!(text.contains("osavul complexity --path <файл-або-тека>"));
+    assert!(text.contains("Git не потрібен"));
     assert!(text.contains("Коди завершення complexity"));
     assert_eq!(first.stdout, second.stdout);
 }
@@ -63,6 +65,9 @@ fn extra_argument_is_usage_error() {
     assert_usage_error(&["--version", "extra"]);
     assert_usage_error(&["check", "a.rs", "extra"]);
     assert_usage_error(&["complexity", "HEAD", "extra"]);
+    assert_usage_error(&["complexity", "--path", "a.ts", "extra"]);
+    assert_usage_error(&["complexity", "--path=a.ts", "a.ts"]);
+    assert_usage_error(&["complexity", "a.ts", "--path"]);
 }
 
 #[test]
@@ -358,13 +363,14 @@ fn old_commit_inventory_ignores_later_and_local_changes() {
     repo.git(&["update-index", "--chmod=+x", "run.ts"]);
     repo.git(&["commit", "-q", "-m", "one"]);
     let old = repo.git(&["rev-parse", "HEAD"]);
+    let old_stdout = repo.complexity(&old).stdout;
 
     repo.write("a.ts", b"const changed = 1;\n");
     repo.write("later.ts", b"function l() {}\n");
     repo.commit("two");
-    repo.write("a.ts", b"function staged() {}\n");
+    repo.write("a.ts", b"function staged() { return 1; }\n");
     repo.git(&["add", "a.ts"]);
-    repo.write("a.ts", b"function worktree() {}\n");
+    repo.write("a.ts", b"function worktree() { if (a) {} if (b) {} }\n");
     repo.write("untracked.ts", b"function u() {}\n");
 
     let expected = vec![
@@ -384,7 +390,56 @@ fn old_commit_inventory_ignores_later_and_local_changes() {
         assert_eq!(v["sha"], old.as_str());
         assert_eq!(pairs(&v), expected, "{rev}");
         assert_eq!(v["total"], 6);
+        assert_eq!(out.stdout, old_stdout);
     }
+
+    // Локальний звіт читає диск: змінений і невідстежуваний файли видно, індекс не впливає.
+    let local = repo.run(&repo.root, &["complexity", "--path", "."]);
+    assert_eq!(local.status.code(), Some(0));
+    assert!(local.stderr.is_empty());
+    let v = json_of(&local);
+    assert!(v.as_object().unwrap().contains_key("sha"));
+    assert!(v["sha"].is_null());
+    assert_eq!(v["scope"]["input"], "directory");
+    let expected: Vec<(String, serde_json::Value)> = [
+        ("a.ts", 3),
+        ("dir/a.ts", 2),
+        ("later.ts", 1),
+        ("run.ts", 1),
+        ("src/deep/x.test.ts", 1),
+        ("types.d.ts", 0),
+        ("untracked.ts", 1),
+    ]
+    .into_iter()
+    .map(|(p, n)| (p.to_string(), serde_json::json!(n)))
+    .collect();
+    assert_eq!(pairs(&v), expected);
+    assert_eq!(v["total"], 9);
+    assert_eq!(repo.complexity(&old).stdout, old_stdout);
+}
+
+#[test]
+fn single_operand_with_leading_dash_is_a_revision() {
+    let repo = Repo::new("dash");
+    repo.write("a.ts", b"function a() {}\n");
+    let sha = repo.commit("one");
+    repo.git(&["branch", "-q", "--", "dash-branch"]);
+    repo.git(&["update-ref", "refs/heads/-d", &sha]);
+    for op in ["-d", "--path"] {
+        let out = repo.complexity(op);
+        // `-d` розв'язується як гілка, `--path` — ні, але це помилка Git, а не аргументів.
+        if op == "-d" {
+            assert_eq!(out.status.code(), Some(0), "{op}");
+            assert_eq!(json_of(&out)["sha"], sha.as_str());
+        } else {
+            assert_eq!(out.status.code(), Some(2));
+            assert!(!String::from_utf8(out.stderr).unwrap().contains("osavul --help"));
+        }
+    }
+    // Іменем файла операнд не стає локальним входом.
+    repo.write("HEAD", b"function h() {}\n");
+    let out = repo.complexity("HEAD");
+    assert_eq!(json_of(&out)["sha"], sha.as_str());
 }
 
 #[test]
@@ -545,4 +600,185 @@ fn stdout_write_failure_is_fatal() {
     let out = cmd.output().unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert!(!out.stderr.is_empty());
+}
+
+fn local_dir(name: &str) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("loc-{}-{name}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    set_mode(&dir, 0o755);
+    dir
+}
+
+fn set_mode(path: &Path, mode: u32) {
+    std::os::unix::fs::PermissionsExt::set_mode(&mut fs::metadata(path).unwrap().permissions(), mode);
+    fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode)).unwrap();
+}
+
+/// Запуск без Git у PATH; `restricted` — непривілейований користувач, якщо тест іде від root.
+fn local_run(dir: &Path, args: &[&str], restricted: bool) -> Output {
+    let empty = dir.parent().unwrap().join("empty-path");
+    fs::create_dir_all(&empty).unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
+    cmd.args(args).current_dir(dir).env("PATH", &empty);
+    if restricted && is_root() {
+        std::os::unix::process::CommandExt::uid(&mut cmd, 65534);
+        std::os::unix::process::CommandExt::gid(&mut cmd, 65534);
+    }
+    cmd.output().expect("не вдалося запустити osavul")
+}
+
+fn is_root() -> bool {
+    let out = Command::new("id").arg("-u").output().unwrap();
+    String::from_utf8_lossy(&out.stdout).trim() == "0"
+}
+
+fn copy_corpus(dir: &Path) {
+    for f in ["straight.ts", "branch.ts"] {
+        fs::copy(format!("{FIXTURES}/{f}"), dir.join(f)).unwrap();
+    }
+}
+
+#[test]
+fn local_corpus_works_outside_git_for_files_and_directory() {
+    let dir = local_dir("corpus");
+    copy_corpus(&dir);
+    for (arg, input, expected) in [
+        ("straight.ts", "file", vec![("straight.ts", 1)]),
+        ("branch.ts", "file", vec![("branch.ts", 2)]),
+        (".", "directory", vec![("branch.ts", 2), ("straight.ts", 1)]),
+    ] {
+        let first = local_run(&dir, &["complexity", "--path", arg], false);
+        let second = local_run(&dir, &["complexity", "--path", arg], false);
+        assert_eq!(first.status.code(), Some(0), "{arg}");
+        assert!(first.stderr.is_empty());
+        assert_eq!(first.stdout, second.stdout);
+        let v = json_of(&first);
+        assert!(v.as_object().unwrap().contains_key("sha"));
+        assert!(v["sha"].is_null());
+        assert_eq!(v["scope"]["input"], input);
+        assert_eq!(v["complete"], true);
+        let expected: Vec<(String, serde_json::Value)> =
+            expected.into_iter().map(|(p, n)| (p.to_string(), serde_json::json!(n))).collect();
+        assert_eq!(pairs(&v), expected);
+        assert_eq!(v["total"], expected.iter().map(|e| e.1.as_u64().unwrap()).sum::<u64>());
+    }
+}
+
+#[test]
+fn local_empty_selection_is_complete_zero() {
+    let dir = local_dir("empty");
+    fs::write(dir.join("a.tsx"), b"x").unwrap();
+    let out = local_run(&dir, &["complexity", "--path", "."], false);
+    assert_eq!(out.status.code(), Some(0));
+    let v = json_of(&out);
+    assert_eq!((v["files"].as_array().unwrap().len(), v["complete"].clone(), v["total"].clone()), (0, true.into(), 0.into()));
+}
+
+#[test]
+fn local_non_utf8_name_is_reported_as_path_bytes() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = local_dir("bytes");
+    fs::write(dir.join(std::ffi::OsStr::from_bytes(b"\xff.ts")), b"function f() {}\n").unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
+    cmd.args(["complexity", "--path"]).arg(&dir);
+    let out = cmd.output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let v = json_of(&out);
+    assert!(v["files"][0]["path"].is_null());
+    assert_eq!(v["files"][0]["pathBytes"], "ff2e7473");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
+    cmd.args(["complexity", "--path"]).arg(dir.join(std::ffi::OsStr::from_bytes(b"\xff.ts")));
+    let single = cmd.output().unwrap();
+    assert_eq!(single.status.code(), Some(0));
+    assert_eq!(json_of(&single)["files"][0]["pathBytes"], "ff2e7473");
+}
+
+#[test]
+fn local_mixed_failures_report_each_reason_and_keep_later_files() {
+    let dir = local_dir("mixed");
+    fs::write(dir.join("a_zero.ts"), b"export const z = 1;\n").unwrap();
+    fs::write(dir.join("b_syntax.ts"), b"function (\n").unwrap();
+    fs::write(dir.join("c_utf8.ts"), [0xff, 0xfe, b'x']).unwrap();
+    fs::write(dir.join("d_ok.ts"), b"function f() { return 1; }\n").unwrap();
+    let first = local_run(&dir, &["complexity", "--path", "."], false);
+    let second = local_run(&dir, &["complexity", "--path", "."], false);
+    assert_eq!(first.status.code(), Some(1));
+    assert!(first.stderr.is_empty());
+    assert_eq!(first.stdout, second.stdout);
+    let v = json_of(&first);
+    assert_eq!(v["complete"], false);
+    assert!(v["total"].is_null());
+    let got: Vec<_> = v["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| (f["path"].as_str().unwrap().to_string(), f["cyclomatic"].clone(), f.get("error").cloned()))
+        .collect();
+    let null = serde_json::Value::Null;
+    assert_eq!(
+        got,
+        vec![
+            ("a_zero.ts".to_string(), 0.into(), None),
+            ("b_syntax.ts".to_string(), null.clone(), Some("syntax-error".into())),
+            ("c_utf8.ts".to_string(), null, Some("invalid-utf8".into())),
+            ("d_ok.ts".to_string(), 1.into(), None),
+        ]
+    );
+}
+
+fn assert_fatal(out: &Output) {
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    assert!(!out.stderr.is_empty());
+}
+
+#[test]
+fn local_fatal_inputs_have_empty_stdout() {
+    let dir = local_dir("fatal");
+    fs::write(dir.join("a.txt"), b"x").unwrap();
+    assert_fatal(&local_run(&dir, &["complexity", "--path", "missing.ts"], false));
+    assert_fatal(&local_run(&dir, &["complexity", "--path", "a.txt"], false));
+}
+
+#[test]
+fn local_unreadable_file_keeps_record_and_scores_the_next_file() {
+    let dir = local_dir("unreadable");
+    fs::write(dir.join("a.ts"), b"function a() {}\n").unwrap();
+    fs::write(dir.join("b.ts"), b"function b() {}\n").unwrap();
+    fs::write(dir.join("c.ts"), b"function c() { if (1) {} }\n").unwrap();
+    for f in ["a.ts", "b.ts", "c.ts"] {
+        set_mode(&dir.join(f), 0o644);
+    }
+    let control = local_run(&dir, &["complexity", "--path", "."], true);
+    assert_eq!(control.status.code(), Some(0), "{}", String::from_utf8_lossy(&control.stderr));
+    set_mode(&dir.join("b.ts"), 0o000);
+    let out = local_run(&dir, &["complexity", "--path", "."], true);
+    assert_eq!(out.status.code(), Some(1));
+    let v = json_of(&out);
+    assert_eq!(v["files"][0]["cyclomatic"], 1);
+    assert_eq!(v["files"][1]["path"], "b.ts");
+    assert!(v["files"][1]["cyclomatic"].is_null());
+    assert_eq!(v["files"][1]["error"], "read-error");
+    assert_eq!(v["files"][2]["cyclomatic"], 2);
+    assert!(v["total"].is_null());
+    assert_eq!(v["complete"], false);
+}
+
+#[test]
+fn local_unlistable_nested_directory_is_fatal_even_after_good_files() {
+    let dir = local_dir("unlistable");
+    fs::write(dir.join("a.ts"), b"function a() {}\n").unwrap();
+    set_mode(&dir.join("a.ts"), 0o644);
+    let sub = dir.join("sub");
+    fs::create_dir(&sub).unwrap();
+    set_mode(&sub, 0o755);
+    fs::write(sub.join("b.ts"), b"function b() {}\n").unwrap();
+    set_mode(&sub.join("b.ts"), 0o644);
+    let control = local_run(&dir, &["complexity", "--path", "."], true);
+    assert_eq!(control.status.code(), Some(0), "{}", String::from_utf8_lossy(&control.stderr));
+    set_mode(&sub, 0o000);
+    let out = local_run(&dir, &["complexity", "--path", "."], true);
+    set_mode(&sub, 0o755);
+    assert_fatal(&out);
 }
