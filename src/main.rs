@@ -1,4 +1,6 @@
 mod complexity_report;
+#[allow(dead_code)] // команду підключає наступна частина
+mod duplication_report;
 mod empty_rust_test;
 mod git_tree;
 mod local_tree;

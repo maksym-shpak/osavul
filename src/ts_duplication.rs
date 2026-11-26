@@ -215,7 +215,7 @@ fn find_groups_with<S: std::hash::BuildHasher>(files: &[&Prepared], hasher: S) -
 /// Відкидає групу, всі входження якої покриті входженнями однієї довшої групи з тим самим
 /// набором файлів.
 fn drop_contained(candidates: &mut Vec<Candidate>, file_count: usize) -> Vec<Candidate> {
-    candidates.sort_by(|a, b| b.len.cmp(&a.len));
+    candidates.sort_by_key(|a| std::cmp::Reverse(a.len));
     let file_set = |c: &Candidate| -> Vec<usize> {
         let mut v: Vec<usize> = c.starts.iter().map(|s| s.0).collect();
         v.sort_unstable();
@@ -272,6 +272,9 @@ fn drop_contained(candidates: &mut Vec<Candidate>, file_count: usize) -> Vec<Can
 /// Суфіксний масив подвоєнням префіксів.
 fn suffix_array(seq: &[u32]) -> Vec<usize> {
     let n = seq.len();
+    if n == 0 {
+        return Vec::new();
+    }
     let mut sa: Vec<usize> = (0..n).collect();
     let mut rank: Vec<usize> = seq.iter().map(|&x| x as usize).collect();
     let mut tmp = vec![0usize; n];
@@ -284,7 +287,7 @@ fn suffix_array(seq: &[u32]) -> Vec<usize> {
             tmp[sa[w]] = tmp[sa[w - 1]] + usize::from(key(sa[w]) != key(sa[w - 1]));
         }
         rank.copy_from_slice(&tmp);
-        if n == 0 || rank[sa[n - 1]] == n - 1 {
+        if rank[sa[n - 1]] == n - 1 {
             break;
         }
         k *= 2;
