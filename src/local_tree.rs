@@ -109,10 +109,9 @@ pub fn collect(root: &Path) -> Result<(InputKind, Vec<FileInput>), String> {
     Ok((kind, files))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::symlink;
 
     fn tree(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("osavul-lt-{}-{name}", std::process::id()));
@@ -136,10 +135,10 @@ mod tests {
             .collect()
     }
 
-    // Виявляє зміну порядку (за порядком обходу чи за компонентами шляху) та потрапляння посилань,
-    // виключених тек або інших суфіксів у відбір.
+    // Виявляє зміну порядку (за порядком обходу чи за компонентами шляху) та потрапляння
+    // виключених тек, тек із суфіксом `.ts` або інших суфіксів у відбір.
     #[test]
-    fn selects_sorted_by_whole_path_bytes_and_skips_excluded_and_links() {
+    fn selects_sorted_by_whole_path_bytes_and_skips_excluded() {
         let root = tree("matrix");
         for rel in [
             "b.ts",
@@ -160,8 +159,6 @@ mod tests {
         ] {
             touch(&root, rel);
         }
-        symlink("a.ts", root.join("link.ts")).unwrap();
-        symlink("real", root.join("linkdir")).unwrap();
         fs::create_dir(root.join("dir.ts")).unwrap();
         // "a.b/y.ts" < "a.ts" < "a/z.ts" за байтами повних шляхів ('.' < '/').
         assert_eq!(
@@ -179,9 +176,24 @@ mod tests {
         );
     }
 
+    // Фізичні посилання потребують POSIX API (на Windows їх створення може вимагати прав).
+    #[cfg(unix)]
+    #[test]
+    fn internal_symlinks_are_skipped() {
+        use std::os::unix::fs::symlink;
+        let root = tree("links");
+        touch(&root, "a.ts");
+        touch(&root, "real/inner.ts");
+        symlink("a.ts", root.join("link.ts")).unwrap();
+        symlink("real", root.join("linkdir")).unwrap();
+        assert_eq!(keys(&root), ["a.ts", "real/inner.ts"]);
+    }
+
+    #[cfg(unix)]
     // Виявляє втрату розіменування кореня або підміну ключа іменем цілі замість імені посилання.
     #[test]
     fn root_symlinks_are_dereferenced_and_named_by_link() {
+        use std::os::unix::fs::symlink;
         let root = tree("rootlink");
         touch(&root, "real/a.ts");
         touch(&root, "plain.txt");

@@ -8,7 +8,6 @@
 //! збої одного.
 
 use std::fs;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -100,7 +99,7 @@ fn duplication_argument_forms_are_validated() {
     assert_usage_error(&["duplication", "--path", "a.ts", "extra"]);
     assert_usage_error(&["duplication", "--path=a.ts", "a.ts"]);
     assert_usage_error(&["duplication", "a.ts", "--path"]);
-    let bad = std::ffi::OsStr::from_bytes(b"\xff");
+    let bad = invalid_text_arg("", "");
     let out = Command::new(env!("CARGO_BIN_EXE_osavul"))
         .arg("duplication")
         .arg(bad)
@@ -108,6 +107,26 @@ fn duplication_argument_forms_are_validated() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert!(out.stdout.is_empty());
+}
+
+/// Текстовий аргумент, який не подається в UTF-8: невалідний байт на Unix, непарний сурогат на Windows.
+/// Файл на диску для нього не потрібен.
+#[cfg(unix)]
+fn invalid_text_arg(prefix: &str, suffix: &str) -> std::ffi::OsString {
+    use std::os::unix::ffi::OsStringExt;
+    let mut bytes = prefix.as_bytes().to_vec();
+    bytes.push(0xff);
+    bytes.extend_from_slice(suffix.as_bytes());
+    std::ffi::OsString::from_vec(bytes)
+}
+
+#[cfg(windows)]
+fn invalid_text_arg(prefix: &str, suffix: &str) -> std::ffi::OsString {
+    use std::os::windows::ffi::OsStringExt;
+    let mut units: Vec<u16> = prefix.encode_utf16().collect();
+    units.push(0xD800);
+    units.extend(suffix.encode_utf16());
+    std::ffi::OsString::from_wide(&units)
 }
 
 fn temp_file(name: &str, content: &[u8]) -> PathBuf {
@@ -892,6 +911,21 @@ fn local_empty_selection_is_complete_zero() {
 }
 
 #[test]
+fn local_nested_unicode_name_is_reported_exactly() {
+    let dir = local_dir("unicode");
+    fs::create_dir_all(dir.join("дані")).unwrap();
+    fs::write(dir.join("дані").join("🌿.ts"), b"function f() {}\n").unwrap();
+    let out = local_run(&dir, &["complexity", "--path", "."], false);
+    assert_eq!(out.status.code(), Some(0));
+    let v = json_of(&out);
+    assert_eq!(v["files"][0]["path"], "дані/🌿.ts");
+    assert!(v["files"][0].get("pathBytes").is_none_or(|b| b.is_null()));
+}
+
+// Фізичне ім'я з невалідним UTF-8 можна створити на Linux; APFS таких імен не допускає, а Windows
+// подає імена інакше. Байти шляху з дерева Git перевіряє окремий тест без checkout.
+#[cfg(target_os = "linux")]
+#[test]
 fn local_non_utf8_name_is_reported_as_path_bytes() {
     use std::os::unix::ffi::OsStrExt;
     let dir = local_dir("bytes");
@@ -1072,10 +1106,9 @@ fn metric_option_errors_are_usage_errors_before_source_access() {
 
 #[test]
 fn metric_value_outside_utf8_is_usage_error() {
-    use std::os::unix::ffi::OsStrExt;
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
     cmd.args(["complexity", "HEAD", "--metric"])
-        .arg(std::ffi::OsStr::from_bytes(b"cog\xffnitive"));
+        .arg(invalid_text_arg("cog", "nitive"));
     let out = cmd.output().unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert!(out.stdout.is_empty());
@@ -1303,7 +1336,7 @@ fn coverage_argument_errors_are_usage_errors() {
     assert_usage_error(&["coverage", "--path", ".", "--lcov", "a", "--tests", "/abs"]);
     assert_usage_error(&["coverage", "--path", ".", "--lcov", "a", "--tests", "../x"]);
     assert_usage_error(&["coverage", "--path", ".", "--lcov", "a", "--tests", ""]);
-    let bad = std::ffi::OsStr::from_bytes(b"\xff");
+    let bad = invalid_text_arg("", "");
     let out = Command::new(env!("CARGO_BIN_EXE_osavul"))
         .args(["coverage"])
         .arg(bad)
