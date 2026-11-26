@@ -321,9 +321,12 @@ fn isolate(cmd: &mut Command, home: &Path) {
             cmd.env_remove(k);
         }
     }
+    // Порожній файл замість `/dev/null`, якого на Windows немає.
+    let empty_config = home.join("empty-gitconfig");
+    fs::write(&empty_config, b"").unwrap();
     cmd.env("HOME", home)
         .env("XDG_CONFIG_HOME", home)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_GLOBAL", &empty_config)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_AUTHOR_NAME", "T")
         .env("GIT_AUTHOR_EMAIL", "t@example.com")
@@ -365,6 +368,28 @@ impl Repo {
         String::from_utf8(out.stdout).unwrap().trim().to_string()
     }
 
+    /// Запускає Git із байтами в stdin (для шляхів, які не є UTF-8).
+    fn git_stdin(&self, args: &[&str], input: &[u8]) -> String {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut cmd = Command::new("git");
+        cmd.args(args)
+            .current_dir(&self.root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        isolate(&mut cmd, &self.home);
+        let mut child = cmd.spawn().unwrap();
+        child.stdin.take().unwrap().write_all(input).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
     fn write(&self, path: &str, content: &[u8]) {
         let full = self.root.join(path);
         fs::create_dir_all(full.parent().unwrap()).unwrap();
@@ -394,6 +419,19 @@ impl Repo {
             .join(&oid[..2])
             .join(&oid[2..])
     }
+}
+
+/// Знімає захист запису з loose-об'єкта Git, щоб його можна було змінити чи вилучити.
+#[cfg(unix)]
+fn make_writable(path: &Path) {
+    set_mode(path, 0o644);
+}
+
+#[cfg(not(unix))]
+fn make_writable(path: &Path) {
+    let mut perm = fs::metadata(path).unwrap().permissions();
+    perm.set_readonly(false);
+    fs::set_permissions(path, perm).unwrap();
 }
 
 fn json_of(out: &Output) -> serde_json::Value {
@@ -460,17 +498,32 @@ fn old_commit_inventory_ignores_later_and_local_changes() {
     for skipped in ["U.TS", "x.tsx", "x.mts", "x.cts"] {
         repo.write(skipped, IF_ELSE.as_bytes());
     }
-    std::os::unix::fs::symlink("a.ts", repo.root.join("link.ts")).unwrap();
+    // `add -A` стоїть першим: він вилучив би з індексу записи без файла в робочій теці.
+    repo.git(&["add", "-A"]);
+    let target = repo.home.join("link-target");
+    fs::write(&target, b"a.ts").unwrap();
+    let link_blob = repo.git(&["hash-object", "-w", target.to_str().unwrap()]);
+    repo.git(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("120000,{link_blob},link.ts"),
+    ]);
     repo.git(&[
         "update-index",
         "--add",
         "--cacheinfo",
         "160000,1111111111111111111111111111111111111111,sub.ts",
     ]);
-    repo.git(&["add", "-A"]);
     repo.git(&["update-index", "--chmod=+x", "run.ts"]);
     repo.git(&["commit", "-q", "-m", "one"]);
     let old = repo.git(&["rev-parse", "HEAD"]);
+    let modes = repo.git(&["ls-tree", &old, "a.ts", "run.ts", "link.ts", "sub.ts"]);
+    let modes: Vec<&str> = modes
+        .lines()
+        .map(|l| l.split_whitespace().next().unwrap())
+        .collect();
+    assert_eq!(modes, ["100644", "120000", "100755", "160000"]);
     let old_stdout = repo.complexity(&old).stdout;
 
     repo.write("a.ts", b"const changed = 1;\n");
@@ -526,6 +579,27 @@ fn old_commit_inventory_ignores_later_and_local_changes() {
     assert_eq!(pairs(&v), expected);
     assert_eq!(v["total"], 9);
     assert_eq!(repo.complexity(&old).stdout, old_stdout);
+}
+
+#[test]
+fn git_tree_non_utf8_name_is_reported_as_path_bytes_without_checkout() {
+    let repo = Repo::new("tree-bytes");
+    let blob = repo.git_stdin(&["hash-object", "-w", "--stdin"], b"function f() {}\n");
+    // Ім'я йде в індекс байтами, без файла в робочій теці й без перекодування.
+    let mut info = format!("100644 {blob}\t").into_bytes();
+    info.extend_from_slice(b"d\xffir/\xff.ts\n");
+    repo.git_stdin(&["update-index", "--add", "--index-info"], &info);
+    repo.git(&["commit", "-q", "-m", "bytes"]);
+    let out = repo.complexity("HEAD");
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stderr.is_empty());
+    let v = json_of(&out);
+    assert_eq!(v["files"].as_array().unwrap().len(), 1);
+    assert!(v["files"][0]["path"].is_null());
+    assert_eq!(
+        v["files"][0]["pathBytes"],
+        "64ff6972 2fff2e7473".replace(' ', "")
+    );
 }
 
 #[test]
@@ -594,9 +668,7 @@ fn unreadable_blob_keeps_path_and_later_objects_are_still_scored() {
     let sha = repo.commit("three");
     let oid = repo.git(&["rev-parse", "HEAD:b.ts"]);
     let obj = repo.loose_object(&oid);
-    let mut perm = fs::metadata(&obj).unwrap().permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o644);
-    fs::set_permissions(&obj, perm).unwrap();
+    make_writable(&obj);
     fs::write(&obj, b"not a zlib stream").unwrap();
 
     let first = repo.complexity(&sha);
@@ -624,9 +696,7 @@ fn unreadable_tree_is_fatal() {
     let sha = repo.commit("one");
     let tree = repo.git(&["rev-parse", "HEAD^{tree}"]);
     let obj = repo.loose_object(&tree);
-    let mut perm = fs::metadata(&obj).unwrap().permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o644);
-    fs::set_permissions(&obj, perm).unwrap();
+    make_writable(&obj);
     fs::remove_file(&obj).unwrap();
     let out = repo.complexity(&sha);
     assert_eq!(out.status.code(), Some(2));
@@ -682,6 +752,16 @@ fn unknown_revision_outside_repository_and_missing_git_are_fatal() {
     }
 }
 
+/// URL локального транспорту: лише `file://` змушує Git справді фільтрувати об'єкти.
+fn file_url(path: &Path) -> String {
+    let p = path.display().to_string().replace('\\', "/");
+    if p.starts_with('/') {
+        format!("file://{p}")
+    } else {
+        format!("file:///{p}")
+    }
+}
+
 #[test]
 fn partial_clone_does_not_fetch_missing_blobs() {
     let source = Repo::new("partial-src");
@@ -691,7 +771,7 @@ fn partial_clone_does_not_fetch_missing_blobs() {
     let clone = source.home.join("clone");
     let mut cmd = Command::new("git");
     cmd.args(["clone", "-q", "--filter=blob:none", "--no-checkout"])
-        .arg(format!("file://{}", source.root.display()))
+        .arg(file_url(&source.root))
         .arg(&clone);
     isolate(&mut cmd, &source.home);
     let out = cmd.output().unwrap();
