@@ -8,7 +8,6 @@
 //! збої одного.
 
 use std::fs;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -100,7 +99,7 @@ fn duplication_argument_forms_are_validated() {
     assert_usage_error(&["duplication", "--path", "a.ts", "extra"]);
     assert_usage_error(&["duplication", "--path=a.ts", "a.ts"]);
     assert_usage_error(&["duplication", "a.ts", "--path"]);
-    let bad = std::ffi::OsStr::from_bytes(b"\xff");
+    let bad = invalid_text_arg("", "");
     let out = Command::new(env!("CARGO_BIN_EXE_osavul"))
         .arg("duplication")
         .arg(bad)
@@ -108,6 +107,26 @@ fn duplication_argument_forms_are_validated() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert!(out.stdout.is_empty());
+}
+
+/// Текстовий аргумент, який не подається в UTF-8: невалідний байт на Unix, непарний сурогат на Windows.
+/// Файл на диску для нього не потрібен.
+#[cfg(unix)]
+fn invalid_text_arg(prefix: &str, suffix: &str) -> std::ffi::OsString {
+    use std::os::unix::ffi::OsStringExt;
+    let mut bytes = prefix.as_bytes().to_vec();
+    bytes.push(0xff);
+    bytes.extend_from_slice(suffix.as_bytes());
+    std::ffi::OsString::from_vec(bytes)
+}
+
+#[cfg(windows)]
+fn invalid_text_arg(prefix: &str, suffix: &str) -> std::ffi::OsString {
+    use std::os::windows::ffi::OsStringExt;
+    let mut units: Vec<u16> = prefix.encode_utf16().collect();
+    units.push(0xD800);
+    units.extend(suffix.encode_utf16());
+    std::ffi::OsString::from_wide(&units)
 }
 
 fn temp_file(name: &str, content: &[u8]) -> PathBuf {
@@ -302,9 +321,12 @@ fn isolate(cmd: &mut Command, home: &Path) {
             cmd.env_remove(k);
         }
     }
+    // Порожній файл замість `/dev/null`, якого на Windows немає.
+    let empty_config = home.join("empty-gitconfig");
+    fs::write(&empty_config, b"").unwrap();
     cmd.env("HOME", home)
         .env("XDG_CONFIG_HOME", home)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_GLOBAL", &empty_config)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_AUTHOR_NAME", "T")
         .env("GIT_AUTHOR_EMAIL", "t@example.com")
@@ -346,6 +368,28 @@ impl Repo {
         String::from_utf8(out.stdout).unwrap().trim().to_string()
     }
 
+    /// Запускає Git із байтами в stdin (для шляхів, які не є UTF-8).
+    fn git_stdin(&self, args: &[&str], input: &[u8]) -> String {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut cmd = Command::new("git");
+        cmd.args(args)
+            .current_dir(&self.root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        isolate(&mut cmd, &self.home);
+        let mut child = cmd.spawn().unwrap();
+        child.stdin.take().unwrap().write_all(input).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
     fn write(&self, path: &str, content: &[u8]) {
         let full = self.root.join(path);
         fs::create_dir_all(full.parent().unwrap()).unwrap();
@@ -375,6 +419,21 @@ impl Repo {
             .join(&oid[..2])
             .join(&oid[2..])
     }
+}
+
+/// Знімає захист запису з loose-об'єкта Git, щоб його можна було змінити чи вилучити.
+#[cfg(unix)]
+fn make_writable(path: &Path) {
+    set_mode(path, 0o644);
+}
+
+#[cfg(not(unix))]
+fn make_writable(path: &Path) {
+    let mut perm = fs::metadata(path).unwrap().permissions();
+    // На Windows атрибут readonly єдиний засіб захисту запису; Unix-семантики світового запису тут немає.
+    #[allow(clippy::permissions_set_readonly_false)]
+    perm.set_readonly(false);
+    fs::set_permissions(path, perm).unwrap();
 }
 
 fn json_of(out: &Output) -> serde_json::Value {
@@ -441,17 +500,32 @@ fn old_commit_inventory_ignores_later_and_local_changes() {
     for skipped in ["U.TS", "x.tsx", "x.mts", "x.cts"] {
         repo.write(skipped, IF_ELSE.as_bytes());
     }
-    std::os::unix::fs::symlink("a.ts", repo.root.join("link.ts")).unwrap();
+    // `add -A` стоїть першим: він вилучив би з індексу записи без файла в робочій теці.
+    repo.git(&["add", "-A"]);
+    let target = repo.home.join("link-target");
+    fs::write(&target, b"a.ts").unwrap();
+    let link_blob = repo.git(&["hash-object", "-w", target.to_str().unwrap()]);
+    repo.git(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("120000,{link_blob},link.ts"),
+    ]);
     repo.git(&[
         "update-index",
         "--add",
         "--cacheinfo",
         "160000,1111111111111111111111111111111111111111,sub.ts",
     ]);
-    repo.git(&["add", "-A"]);
     repo.git(&["update-index", "--chmod=+x", "run.ts"]);
     repo.git(&["commit", "-q", "-m", "one"]);
     let old = repo.git(&["rev-parse", "HEAD"]);
+    let modes = repo.git(&["ls-tree", &old, "a.ts", "run.ts", "link.ts", "sub.ts"]);
+    let modes: Vec<&str> = modes
+        .lines()
+        .map(|l| l.split_whitespace().next().unwrap())
+        .collect();
+    assert_eq!(modes, ["100644", "120000", "100755", "160000"]);
     let old_stdout = repo.complexity(&old).stdout;
 
     repo.write("a.ts", b"const changed = 1;\n");
@@ -507,6 +581,27 @@ fn old_commit_inventory_ignores_later_and_local_changes() {
     assert_eq!(pairs(&v), expected);
     assert_eq!(v["total"], 9);
     assert_eq!(repo.complexity(&old).stdout, old_stdout);
+}
+
+#[test]
+fn git_tree_non_utf8_name_is_reported_as_path_bytes_without_checkout() {
+    let repo = Repo::new("tree-bytes");
+    let blob = repo.git_stdin(&["hash-object", "-w", "--stdin"], b"function f() {}\n");
+    // Ім'я йде в індекс байтами, без файла в робочій теці й без перекодування.
+    let mut info = format!("100644 {blob}\t").into_bytes();
+    info.extend_from_slice(b"d\xffir/\xff.ts\n");
+    repo.git_stdin(&["update-index", "--add", "--index-info"], &info);
+    repo.git(&["commit", "-q", "-m", "bytes"]);
+    let out = repo.complexity("HEAD");
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stderr.is_empty());
+    let v = json_of(&out);
+    assert_eq!(v["files"].as_array().unwrap().len(), 1);
+    assert!(v["files"][0]["path"].is_null());
+    assert_eq!(
+        v["files"][0]["pathBytes"],
+        "64ff6972 2fff2e7473".replace(' ', "")
+    );
 }
 
 #[test]
@@ -575,9 +670,7 @@ fn unreadable_blob_keeps_path_and_later_objects_are_still_scored() {
     let sha = repo.commit("three");
     let oid = repo.git(&["rev-parse", "HEAD:b.ts"]);
     let obj = repo.loose_object(&oid);
-    let mut perm = fs::metadata(&obj).unwrap().permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o644);
-    fs::set_permissions(&obj, perm).unwrap();
+    make_writable(&obj);
     fs::write(&obj, b"not a zlib stream").unwrap();
 
     let first = repo.complexity(&sha);
@@ -605,9 +698,7 @@ fn unreadable_tree_is_fatal() {
     let sha = repo.commit("one");
     let tree = repo.git(&["rev-parse", "HEAD^{tree}"]);
     let obj = repo.loose_object(&tree);
-    let mut perm = fs::metadata(&obj).unwrap().permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o644);
-    fs::set_permissions(&obj, perm).unwrap();
+    make_writable(&obj);
     fs::remove_file(&obj).unwrap();
     let out = repo.complexity(&sha);
     assert_eq!(out.status.code(), Some(2));
@@ -663,6 +754,19 @@ fn unknown_revision_outside_repository_and_missing_git_are_fatal() {
     }
 }
 
+/// URL локального транспорту: лише `file://` змушує Git справді фільтрувати об'єкти.
+fn file_url(path: &Path) -> String {
+    let p = path.display().to_string();
+    // Роздільник замінюємо лише на Windows: у POSIX `\` є частиною імені.
+    #[cfg(windows)]
+    let p = p.replace('\\', "/");
+    if p.starts_with('/') {
+        format!("file://{p}")
+    } else {
+        format!("file:///{p}")
+    }
+}
+
 #[test]
 fn partial_clone_does_not_fetch_missing_blobs() {
     let source = Repo::new("partial-src");
@@ -672,7 +776,7 @@ fn partial_clone_does_not_fetch_missing_blobs() {
     let clone = source.home.join("clone");
     let mut cmd = Command::new("git");
     cmd.args(["clone", "-q", "--filter=blob:none", "--no-checkout"])
-        .arg(format!("file://{}", source.root.display()))
+        .arg(file_url(&source.root))
         .arg(&clone);
     isolate(&mut cmd, &source.home);
     let out = cmd.output().unwrap();
@@ -704,70 +808,149 @@ fn stdout_write_failure_is_fatal() {
     let repo = Repo::new("full");
     repo.write("a.ts", b"function a() {}\n");
     repo.commit("one");
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
-    cmd.args(["complexity", "HEAD"])
-        .current_dir(&repo.root)
-        .stdout(
-            fs::OpenOptions::new()
-                .write(true)
-                .open("/dev/full")
-                .unwrap(),
-        );
-    isolate(&mut cmd, &repo.home);
+    let run = || {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
+        cmd.args(["complexity", "HEAD"]).current_dir(&repo.root);
+        isolate(&mut cmd, &repo.home);
+        cmd
+    };
+    // Контроль: справний вхід дає непорожній звіт, тож відмова нижче стосується лише запису.
+    let ok = run().output().unwrap();
+    assert_eq!(ok.status.code(), Some(0));
+    assert!(!ok.stdout.is_empty());
+
+    // Читальний кінець закрито до старту процесу: запис у stdout завершується помилкою.
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let mut cmd = run();
+    cmd.stdout(writer);
     let out = cmd.output().unwrap();
     assert_eq!(out.status.code(), Some(2));
-    assert!(!out.stderr.is_empty());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let reason = stderr
+        .trim_end()
+        .strip_prefix("osavul: не вдалося записати звіт: ")
+        .unwrap_or_else(|| panic!("неочікувана діагностика: {stderr}"));
+    assert!(!reason.is_empty(), "порожня причина: {stderr}");
 }
 
 fn local_dir(name: &str) -> PathBuf {
     // Від root дочірній процес з UID 65534 має пройти шлях до теки, а приватний
     // каталог checkout (0700) цього не дозволяє, тож фікстури лежать у /tmp.
-    let base = if is_root() {
+    #[cfg(unix)]
+    let root = is_root();
+    #[cfg(not(unix))]
+    let root = false;
+    let base = if root {
         PathBuf::from("/tmp").join(format!("osavul-local-{}", std::process::id()))
     } else {
         PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
     };
     fs::create_dir_all(&base).unwrap();
-    if is_root() {
+    #[cfg(unix)]
+    if root {
         set_mode(&base, 0o755);
     }
     let dir = base.join(format!("loc-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
+    #[cfg(unix)]
     set_mode(&dir, 0o755);
     dir
 }
 
+#[cfg(unix)]
 fn set_mode(path: &Path, mode: u32) {
-    std::os::unix::fs::PermissionsExt::set_mode(
-        &mut fs::metadata(path).unwrap().permissions(),
-        mode,
-    );
-    fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode)).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
 }
 
-/// Запуск без Git у PATH; `restricted` — непривілейований користувач, якщо тест іде від root.
+/// Забороняє читання файла, доки живе значення: на POSIX — правами 000, на Windows — утримуваним
+/// дескриптором без спільного доступу. Права відновлюються й у разі паніки тесту.
+struct ReadDenied {
+    #[cfg(unix)]
+    path: PathBuf,
+    #[cfg(windows)]
+    _handle: fs::File,
+}
+
+impl ReadDenied {
+    #[cfg(unix)]
+    fn new(path: &Path) -> Self {
+        set_mode(path, 0o000);
+        ReadDenied {
+            path: path.to_path_buf(),
+        }
+    }
+
+    #[cfg(windows)]
+    fn new(path: &Path) -> Self {
+        use std::os::windows::fs::OpenOptionsExt;
+        let handle = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path)
+            .unwrap();
+        ReadDenied { _handle: handle }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ReadDenied {
+    fn drop(&mut self) {
+        set_mode(&self.path, 0o644);
+    }
+}
+
+/// Запуск без Git у PATH; `restricted` — непривілейований користувач, якщо тест іде від root
+/// (інакше root обходить заборону читання). Копія бінарника унікальна для фікстури, бо спільна
+/// копія під час паралельних запусків дає `ExecutableFileBusy`.
 fn local_run(dir: &Path, args: &[&str], restricted: bool) -> Output {
     let empty = dir.parent().unwrap().join("empty-path");
     fs::create_dir_all(&empty).unwrap();
-    let mut bin = PathBuf::from(env!("CARGO_BIN_EXE_osavul"));
-    if restricted && is_root() {
+    let original = PathBuf::from(env!("CARGO_BIN_EXE_osavul"));
+    #[cfg(unix)]
+    let drop_root = restricted && is_root();
+    #[cfg(not(unix))]
+    let _ = restricted;
+    #[cfg(unix)]
+    let bin = if drop_root {
         // Бінарник теж може лежати під приватним каталогом: копіюємо в доступне місце.
-        let copy = dir.parent().unwrap().join("osavul-bin");
-        fs::copy(&bin, &copy).unwrap();
-        set_mode(&copy, 0o755);
+        let copy = dir.parent().unwrap().join(format!(
+            "osavul-bin-{}",
+            dir.file_name().unwrap().to_string_lossy()
+        ));
+        if !copy.exists() {
+            fs::copy(&original, &copy).unwrap();
+            set_mode(&copy, 0o755);
+        }
         set_mode(&empty, 0o755);
-        bin = copy;
+        copy
+    } else {
+        original
+    };
+    #[cfg(not(unix))]
+    let bin = original;
+    // Паралельний fork іншого тесту може на мить утримати відкритим дескриптор запису копії.
+    for attempt in 0.. {
+        let mut cmd = Command::new(&bin);
+        cmd.args(args).current_dir(dir).env("PATH", &empty);
+        #[cfg(unix)]
+        if drop_root {
+            std::os::unix::process::CommandExt::uid(&mut cmd, 65534);
+            std::os::unix::process::CommandExt::gid(&mut cmd, 65534);
+        }
+        match cmd.output() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 50 => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            r => return r.expect("не вдалося запустити osavul"),
+        }
     }
-    let mut cmd = Command::new(bin);
-    cmd.args(args).current_dir(dir).env("PATH", &empty);
-    if restricted && is_root() {
-        std::os::unix::process::CommandExt::uid(&mut cmd, 65534);
-        std::os::unix::process::CommandExt::gid(&mut cmd, 65534);
-    }
-    cmd.output().expect("не вдалося запустити osavul")
+    unreachable!()
 }
 
+#[cfg(unix)]
 fn is_root() -> bool {
     let out = Command::new("id").arg("-u").output().unwrap();
     String::from_utf8_lossy(&out.stdout).trim() == "0"
@@ -827,6 +1010,21 @@ fn local_empty_selection_is_complete_zero() {
     );
 }
 
+#[test]
+fn local_nested_unicode_name_is_reported_exactly() {
+    let dir = local_dir("unicode");
+    fs::create_dir_all(dir.join("дані")).unwrap();
+    fs::write(dir.join("дані").join("🌿.ts"), b"function f() {}\n").unwrap();
+    let out = local_run(&dir, &["complexity", "--path", "."], false);
+    assert_eq!(out.status.code(), Some(0));
+    let v = json_of(&out);
+    assert_eq!(v["files"][0]["path"], "дані/🌿.ts");
+    assert!(v["files"][0].get("pathBytes").is_none_or(|b| b.is_null()));
+}
+
+// Фізичне ім'я з невалідним UTF-8 можна створити на Linux; APFS таких імен не допускає, а Windows
+// подає імена інакше. Байти шляху з дерева Git перевіряє окремий тест без checkout.
+#[cfg(target_os = "linux")]
 #[test]
 fn local_non_utf8_name_is_reported_as_path_bytes() {
     use std::os::unix::ffi::OsStrExt;
@@ -918,6 +1116,7 @@ fn local_unreadable_file_keeps_record_and_scores_the_next_file() {
     fs::write(dir.join("a.ts"), b"function a() {}\n").unwrap();
     fs::write(dir.join("b.ts"), b"function b() {}\n").unwrap();
     fs::write(dir.join("c.ts"), b"function c() { if (1) {} }\n").unwrap();
+    #[cfg(unix)]
     for f in ["a.ts", "b.ts", "c.ts"] {
         set_mode(&dir.join(f), 0o644);
     }
@@ -928,7 +1127,7 @@ fn local_unreadable_file_keeps_record_and_scores_the_next_file() {
         "{}",
         String::from_utf8_lossy(&control.stderr)
     );
-    set_mode(&dir.join("b.ts"), 0o000);
+    let _denied = ReadDenied::new(&dir.join("b.ts"));
     let out = local_run(&dir, &["complexity", "--path", "."], true);
     assert_eq!(out.status.code(), Some(1));
     let v = json_of(&out);
@@ -941,6 +1140,7 @@ fn local_unreadable_file_keeps_record_and_scores_the_next_file() {
     assert_eq!(v["complete"], false);
 }
 
+#[cfg(unix)]
 #[test]
 fn local_unlistable_nested_directory_is_fatal_even_after_good_files() {
     let dir = local_dir("unlistable");
@@ -962,6 +1162,11 @@ fn local_unlistable_nested_directory_is_fatal_even_after_good_files() {
     let out = local_run(&dir, &["complexity", "--path", "."], true);
     set_mode(&sub, 0o755);
     assert_fatal(&out);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("sub"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 const ONE_IF: &str = "export function f(x: number) { if (x) { return 1; } }\n";
@@ -1001,10 +1206,9 @@ fn metric_option_errors_are_usage_errors_before_source_access() {
 
 #[test]
 fn metric_value_outside_utf8_is_usage_error() {
-    use std::os::unix::ffi::OsStrExt;
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
     cmd.args(["complexity", "HEAD", "--metric"])
-        .arg(std::ffi::OsStr::from_bytes(b"cog\xffnitive"));
+        .arg(invalid_text_arg("cog", "nitive"));
     let out = cmd.output().unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert!(out.stdout.is_empty());
@@ -1232,7 +1436,7 @@ fn coverage_argument_errors_are_usage_errors() {
     assert_usage_error(&["coverage", "--path", ".", "--lcov", "a", "--tests", "/abs"]);
     assert_usage_error(&["coverage", "--path", ".", "--lcov", "a", "--tests", "../x"]);
     assert_usage_error(&["coverage", "--path", ".", "--lcov", "a", "--tests", ""]);
-    let bad = std::ffi::OsStr::from_bytes(b"\xff");
+    let bad = invalid_text_arg("", "");
     let out = Command::new(env!("CARGO_BIN_EXE_osavul"))
         .args(["coverage"])
         .arg(bad)
@@ -1389,55 +1593,70 @@ fn coverage_lcov_resolves_from_cwd_and_report_dir() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(json_of(&out)["files"][0]["inReport"], true);
-    // Корінь-посилання розіменовується.
-    std::os::unix::fs::symlink("pkg", dir.join("link")).unwrap();
-    let out = local_run(
-        &dir,
-        &["coverage", "--path", "link", "--lcov", "pkg/reports/r.info"],
-        false,
-    );
-    assert_eq!(out.status.code(), Some(0));
-    assert_eq!(json_of(&out)["files"][0]["path"], "a.ts");
+    // Корінь, що є посиланням, розіменовується. Створення посилань на Windows потребує прав,
+    // тому цей підсценарій локально там не перевіряється.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("pkg", dir.join("link")).unwrap();
+        let out = local_run(
+            &dir,
+            &["coverage", "--path", "link", "--lcov", "pkg/reports/r.info"],
+            false,
+        );
+        assert_eq!(out.status.code(), Some(0));
+        assert_eq!(json_of(&out)["files"][0]["path"], "a.ts");
+    }
 }
 
 #[test]
 fn coverage_unreadable_main_file_is_incomplete_with_good_neighbours() {
-    if is_root() {
-        return;
-    }
     let dir = local_dir("cov-unreadable");
     fs::write(dir.join("a.ts"), COV_SRC).unwrap();
     fs::write(dir.join("b.ts"), COV_SRC).unwrap();
     fs::write(dir.join("r.info"), cov_lcov("a.ts")).unwrap();
-    set_mode(&dir.join("b.ts"), 0o000);
-    let out = local_run(&dir, &["coverage", "--path", ".", "--lcov", "r.info"], true);
-    set_mode(&dir.join("b.ts"), 0o644);
+    #[cfg(unix)]
+    for f in ["a.ts", "b.ts", "r.info"] {
+        set_mode(&dir.join(f), 0o644);
+    }
+    let args = ["coverage", "--path", ".", "--lcov", "r.info"];
+    let control = local_run(&dir, &args, true);
+    assert_eq!(
+        control.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&control.stderr)
+    );
+    assert!(json_of(&control)["files"][1]["error"].is_null());
+    let _denied = ReadDenied::new(&dir.join("b.ts"));
+    let out = local_run(&dir, &args, true);
     assert_eq!(out.status.code(), Some(1));
     assert!(out.stderr.is_empty());
     let v = json_of(&out);
     assert_eq!(v["files"][0]["linesToCover"], 4);
+    assert_eq!(v["files"][1]["path"], "b.ts");
     assert_eq!(v["files"][1]["error"], "read-error");
 }
 
 #[test]
 fn coverage_unreadable_lcov_is_fatal() {
-    if is_root() {
-        return;
-    }
     let dir = local_dir("cov-lcov-denied");
     fs::write(dir.join("a.ts"), COV_SRC).unwrap();
     fs::write(dir.join("ok.info"), cov_lcov("a.ts")).unwrap();
     fs::write(dir.join("no.info"), cov_lcov("a.ts")).unwrap();
-    set_mode(&dir.join("no.info"), 0o000);
-    let out = local_run(
-        &dir,
-        &[
-            "coverage", "--path", ".", "--lcov", "ok.info", "--lcov", "no.info",
-        ],
-        true,
-    );
-    set_mode(&dir.join("no.info"), 0o644);
+    #[cfg(unix)]
+    for f in ["a.ts", "ok.info", "no.info"] {
+        set_mode(&dir.join(f), 0o644);
+    }
+    let args = [
+        "coverage", "--path", ".", "--lcov", "ok.info", "--lcov", "no.info",
+    ];
+    let control = local_run(&dir, &args, true);
+    assert_ne!(control.status.code(), Some(2));
+    let _denied = ReadDenied::new(&dir.join("no.info"));
+    let out = local_run(&dir, &args, true);
     assert_fatal(&out);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("LCOV") && err.contains("no.info"), "{err}");
 }
 
 #[test]

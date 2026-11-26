@@ -53,6 +53,13 @@
 - дублювання логіки;
 - архітектурні прогалини та розмивання меж.
 
+## Платформи
+
+Підтримуються Ubuntu Linux (`x86_64-unknown-linux-gnu`), Windows (`x86_64-pc-windows-msvc`) і macOS на Apple Silicon
+(`aarch64-apple-darwin`); інші не є цільовими. Рішення й межі гарантій — в
+[ADR-0003](docs/architecture/decisions/0003-target-platforms.md), команди перевірки — у
+[політиці тестування](docs/testing-policy.md#платформи-й-перевірка-цілей).
+
 ## Доступна команда
 
 ```sh
