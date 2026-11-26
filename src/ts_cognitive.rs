@@ -1,0 +1,422 @@
+//! Методика `ts-cognitive` версії 1: синтаксичний підрахунок когнітивної складності
+//! одного файла TypeScript. Зміна правил підрахунку потребує нової версії.
+//!
+//! Граничні випадки (код поза функціями, рівень `0`), якими зафіксовано правила:
+//!
+//! - `if`, `else if`, `else`, а в тілі `else if` ще один `if`: `1 + 1 + 1 + 2 = 5`.
+//!   `else if` — фіксований `+1`, а його тіло лишається на рівні початкового `if` плюс один.
+//! - Тернарник у гілці тернарника (також в альтернативній): `1 + 2 = 3`.
+//! - У тілі `if` є `switch`, у його `case` є `if`: `1 + 1 + 3 = 5`; `switch` дає `+1`
+//!   один раз, порожні `case` нічого не додають.
+//! - `if` з умовою `a && b || c`: `1 + 2 = 3` (умова обходиться на рівні самого `if`).
+//! - Зовнішній `if`, у тілі `try` з одним `if` і порожній `catch`: `1 + 2 + 2 = 5`;
+//!   `try` рівня не підвищує, `catch` рахується з вкладеністю, а `if` у його тілі додав би `3`.
+//! - Логічні послідовності: `a && b && c` = 1, `a && b || c` = 2,
+//!   `a && b && c || d || e` = 2, `a && (b || c) && d` = 3.
+//! - `async`, `await` і генератори власного приросту не дають.
+
+use crate::ts_source::{ScoreError, with_program};
+use oxc_ast::ast::{
+    BreakStatement, CatchClause, ConditionalExpression, ContinueStatement, DoWhileStatement,
+    Expression, ForInStatement, ForOfStatement, ForStatement, IfStatement, LogicalExpression,
+    LogicalOperator, Statement, SwitchStatement, WhileStatement,
+};
+use oxc_ast_visit::{Visit, walk};
+
+/// Бал файла за його шляхом (лише для вибору режиму `.d.ts`) і сирим вмістом.
+#[allow(dead_code)]
+pub fn score(path: &[u8], content: &[u8]) -> Result<u64, ScoreError> {
+    with_program(path, content, |program| {
+        let mut counter = Counter {
+            total: 0,
+            nesting: 0,
+        };
+        counter.visit_program(program);
+        counter.total
+    })
+}
+
+struct Counter {
+    total: u64,
+    nesting: u64,
+}
+
+impl Counter {
+    /// `+1 + рівень` для конструкції, що вкладається.
+    fn structural(&mut self) {
+        self.total += 1 + self.nesting;
+    }
+
+    fn nested<F: FnOnce(&mut Self)>(&mut self, f: F) {
+        self.nesting += 1;
+        f(self);
+        self.nesting -= 1;
+    }
+
+    // Гілки одного ланцюжка обробляються тут, а не через `visit_if_statement`, щоб
+    // `else if` мав фіксований приріст і той самий рівень тіла, що й початковий `if`.
+    fn if_chain<'a>(&mut self, it: &IfStatement<'a>, is_else_if: bool) {
+        if is_else_if {
+            self.total += 1;
+        } else {
+            self.structural();
+        }
+        self.visit_expression(&it.test);
+        self.nested(|c| c.visit_statement(&it.consequent));
+        match &it.alternate {
+            Some(Statement::IfStatement(next)) => self.if_chain(next, true),
+            Some(other) => {
+                self.total += 1;
+                self.nested(|c| c.visit_statement(other));
+            }
+            None => {}
+        }
+    }
+
+    fn operand<'a>(&mut self, e: &Expression<'a>, last: &mut Option<LogicalOperator>) {
+        match e.without_parentheses() {
+            Expression::LogicalExpression(l) => self.chain(l, last),
+            other => self.visit_expression(other),
+        }
+    }
+
+    // Обхід у порядку запису: бал за початок і кожну зміну виду оператора.
+    fn chain<'a>(&mut self, it: &LogicalExpression<'a>, last: &mut Option<LogicalOperator>) {
+        self.operand(&it.left, last);
+        if *last != Some(it.operator) {
+            self.total += 1;
+            *last = Some(it.operator);
+        }
+        self.operand(&it.right, last);
+    }
+}
+
+impl<'a> Visit<'a> for Counter {
+    fn visit_if_statement(&mut self, it: &IfStatement<'a>) {
+        self.if_chain(it, false);
+    }
+
+    fn visit_conditional_expression(&mut self, it: &ConditionalExpression<'a>) {
+        self.structural();
+        self.visit_expression(&it.test);
+        self.nested(|c| {
+            c.visit_expression(&it.consequent);
+            c.visit_expression(&it.alternate);
+        });
+    }
+
+    fn visit_for_statement(&mut self, it: &ForStatement<'a>) {
+        self.structural();
+        if let Some(init) = &it.init {
+            self.visit_for_statement_init(init);
+        }
+        if let Some(test) = &it.test {
+            self.visit_expression(test);
+        }
+        if let Some(update) = &it.update {
+            self.visit_expression(update);
+        }
+        self.nested(|c| c.visit_statement(&it.body));
+    }
+
+    fn visit_for_in_statement(&mut self, it: &ForInStatement<'a>) {
+        self.structural();
+        self.visit_for_statement_left(&it.left);
+        self.visit_expression(&it.right);
+        self.nested(|c| c.visit_statement(&it.body));
+    }
+
+    // Покриває і `for await…of`.
+    fn visit_for_of_statement(&mut self, it: &ForOfStatement<'a>) {
+        self.structural();
+        self.visit_for_statement_left(&it.left);
+        self.visit_expression(&it.right);
+        self.nested(|c| c.visit_statement(&it.body));
+    }
+
+    fn visit_while_statement(&mut self, it: &WhileStatement<'a>) {
+        self.structural();
+        self.visit_expression(&it.test);
+        self.nested(|c| c.visit_statement(&it.body));
+    }
+
+    fn visit_do_while_statement(&mut self, it: &DoWhileStatement<'a>) {
+        self.structural();
+        self.nested(|c| c.visit_statement(&it.body));
+        self.visit_expression(&it.test);
+    }
+
+    fn visit_catch_clause(&mut self, it: &CatchClause<'a>) {
+        self.structural();
+        if let Some(param) = &it.param {
+            self.visit_catch_parameter(param);
+        }
+        self.nested(|c| c.visit_block_statement(&it.body));
+    }
+
+    fn visit_switch_statement(&mut self, it: &SwitchStatement<'a>) {
+        self.total += 1;
+        self.visit_expression(&it.discriminant);
+        self.nested(|c| {
+            for case in &it.cases {
+                c.visit_switch_case(case);
+            }
+        });
+    }
+
+    fn visit_break_statement(&mut self, it: &BreakStatement<'a>) {
+        if it.label.is_some() {
+            self.total += 1;
+        }
+        walk::walk_break_statement(self, it);
+    }
+
+    fn visit_continue_statement(&mut self, it: &ContinueStatement<'a>) {
+        if it.label.is_some() {
+            self.total += 1;
+        }
+        walk::walk_continue_statement(self, it);
+    }
+
+    fn visit_logical_expression(&mut self, it: &LogicalExpression<'a>) {
+        self.chain(it, &mut None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(src: &str) -> u64 {
+        score(b"a.ts", src.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn if_adds_one_plus_level_and_else_branches_add_one() {
+        assert_eq!(s("if (a) {}"), 1);
+        assert_eq!(s("if (a) {} else {}"), 2);
+        assert_eq!(s("if (a) {} else if (b) {}"), 2);
+        assert_eq!(s("if (a) {} else if (b) {} else {}"), 3);
+    }
+
+    #[test]
+    fn else_if_chain_with_inner_if_in_else_if_body() {
+        assert_eq!(
+            s("if (a) {} else if (b) { if (c) {} } else {}"),
+            1 + 1 + 2 + 1
+        );
+        assert_eq!(s("if (a) {} else if (b) { if (c) {} } else { x(); }"), 5);
+    }
+
+    #[test]
+    fn nested_bodies_raise_level_for_if_and_else() {
+        assert_eq!(s("if (a) { if (b) {} }"), 3);
+        assert_eq!(s("if (a) {} else { if (b) {} }"), 1 + 1 + 2);
+    }
+
+    #[test]
+    fn ternary_in_either_branch_of_ternary_costs_three() {
+        assert_eq!(s("a ? b : c;"), 1);
+        assert_eq!(s("a ? (b ? 1 : 2) : 3;"), 3);
+        assert_eq!(s("a ? 1 : (b ? 2 : 3);"), 3);
+    }
+
+    #[test]
+    fn ternary_test_stays_on_entry_level() {
+        assert_eq!(s("(a ? b : c) ? 1 : 2;"), 2);
+    }
+
+    #[test]
+    fn switch_counts_once_and_nests_its_body() {
+        assert_eq!(s("switch (a) { case 1: case 2: default: }"), 1);
+        assert_eq!(s("if (a) { switch (b) { case 1: case 2: if (c) {} } }"), 5);
+        assert_eq!(s("if (a) { switch (b) { case 1: if (c) {} } }"), 5);
+    }
+
+    #[test]
+    fn all_loop_forms_add_one_plus_level_and_nest_body() {
+        for head in [
+            "for (;;) {",
+            "for (const k in o) {",
+            "for (const v of o) {",
+            "while (a) {",
+        ] {
+            assert_eq!(s(&format!("{head} }}")), 1, "{head}");
+            assert_eq!(s(&format!("{head} if (b) {{}} }}")), 3, "{head}");
+        }
+        assert_eq!(s("do { if (b) {} } while (a);"), 3);
+    }
+
+    #[test]
+    fn for_await_of_counts_like_for_of() {
+        assert_eq!(s("async function f() { for await (const v of o) {} }"), 1);
+    }
+
+    #[test]
+    fn loop_header_is_on_entry_level() {
+        assert_eq!(
+            s("if (a) { for (let i = x ? 1 : 2; i < n; i++) {} }"),
+            1 + 2 + 2
+        );
+    }
+
+    #[test]
+    fn labeled_jumps_add_one_and_plain_jumps_zero() {
+        assert_eq!(s("l: for (;;) { break l; }"), 2);
+        assert_eq!(s("l: for (;;) { continue l; }"), 2);
+        assert_eq!(s("for (;;) { break; }"), 1);
+        assert_eq!(s("for (;;) { continue; }"), 1);
+    }
+
+    #[test]
+    fn catch_nests_but_try_and_finally_do_not() {
+        assert_eq!(s("try { if (a) {} } finally { if (b) {} }"), 2);
+        assert_eq!(s("try {} catch (e) {}"), 1);
+        assert_eq!(s("if (a) { try { if (b) {} } catch (e) {} }"), 1 + 2 + 2);
+        assert_eq!(
+            s("if (a) { try { if (b) {} } catch (e) { if (c) {} } }"),
+            1 + 2 + 2 + 3
+        );
+    }
+
+    #[test]
+    fn level_is_restored_after_each_body() {
+        assert_eq!(s("if (a) { if (b) {} } if (c) {}"), 3 + 1);
+        assert_eq!(s("for (;;) { while (a) {} } while (b) {}"), 3 + 1);
+    }
+
+    #[test]
+    fn logical_sequences_count_starts_and_kind_changes() {
+        assert_eq!(s("a && b && c;"), 1);
+        assert_eq!(s("a && b || c;"), 2);
+        assert_eq!(s("a && b && c || d || e;"), 2);
+        assert_eq!(s("a ?? b ?? c;"), 1);
+        assert_eq!(s("(a ?? b) || c;"), 2);
+        assert_eq!(s("a;"), 0);
+    }
+
+    #[test]
+    fn parentheses_are_transparent_in_logical_sequence() {
+        assert_eq!(s("a && (b || c) && d;"), 3);
+        assert_eq!(s("(a && b) && c;"), 1);
+    }
+
+    #[test]
+    fn if_condition_adds_logical_sequences_to_if() {
+        assert_eq!(s("if (a && b || c) {}"), 3);
+    }
+
+    #[test]
+    fn call_separates_logical_chains() {
+        assert_eq!(s("a && f(b && c) && d;"), 2);
+    }
+
+    #[test]
+    fn negation_separates_logical_chains() {
+        assert_eq!(s("a && !(b && c) && d;"), 2);
+    }
+
+    #[test]
+    fn type_assertion_separates_logical_chains() {
+        assert_eq!(s("a && ((b && c) as boolean) && d;"), 2);
+    }
+
+    #[test]
+    fn ternary_separates_logical_chains() {
+        assert_eq!(s("a && (b ? c && d : e) && f;"), 1 + 1 + 1);
+    }
+
+    #[test]
+    fn zero_contribution_constructs_add_nothing() {
+        assert_eq!(s("try {} finally {}"), 0);
+        assert_eq!(s("a?.b?.(c);"), 0);
+        assert_eq!(s("a ??= b; a ||= b; a &&= b;"), 0);
+        assert_eq!(s("function f(x = 1) { return x; }"), 0);
+        assert_eq!(s("function g() { throw new Error(); }"), 0);
+        assert_eq!(
+            s("type T<A> = A extends string ? 1 : 2; interface I { m(): void }"),
+            0
+        );
+        assert_eq!(s("declare function d(a: number): void;"), 0);
+        assert_eq!(s("function o(a: number): void; function o(a: any) {}"), 0);
+    }
+
+    #[test]
+    fn async_await_and_generators_do_not_change_score() {
+        let body = "if (a) { if (b) {} }";
+        let plain = s(&format!("function f() {{ {body} }}"));
+        assert_eq!(plain, 3);
+        assert_eq!(
+            s(&format!("async function f() {{ await x; {body} }}")),
+            plain
+        );
+        assert_eq!(s(&format!("function* f() {{ yield 1; {body} }}")), plain);
+    }
+
+    #[test]
+    fn executable_subexpressions_of_zero_constructs_are_counted() {
+        assert_eq!(s("a?.[b ? 1 : 2];"), 1);
+        assert_eq!(s("a ||= b && c;"), 1);
+        assert_eq!(s("function f(x = a ? 1 : 2) {}"), 1);
+        assert_eq!(s("throw a ? b : c;"), 1);
+        assert_eq!(s("function f() { return a || b; }"), 1);
+    }
+
+    #[test]
+    fn top_level_and_class_members_start_at_level_zero() {
+        assert_eq!(s("namespace N { if (a) {} }"), 1);
+        assert_eq!(s("class C { x = a ? 1 : 2; static { if (a) {} } }"), 2);
+    }
+
+    #[test]
+    fn declaration_file_is_accepted() {
+        assert_eq!(
+            score(b"types.d.ts", b"declare function f(a: number): void;\n"),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn leading_bom_is_stripped() {
+        assert_eq!(score(b"a.ts", b"\xef\xbb\xbfif (a) {}"), Ok(1));
+    }
+
+    #[test]
+    fn invalid_utf8_is_reported() {
+        assert_eq!(score(b"a.ts", b"\xff"), Err(ScoreError::InvalidUtf8));
+    }
+
+    #[test]
+    fn syntax_error_is_reported() {
+        assert_eq!(score(b"a.ts", b"if ("), Err(ScoreError::Syntax));
+    }
+
+    #[test]
+    fn recovered_tree_with_diagnostic_is_error() {
+        assert_eq!(
+            score(b"a.ts", b"let x = 1; let x = 2; if (a) {} const;"),
+            Err(ScoreError::Syntax)
+        );
+    }
+
+    #[test]
+    fn corpus_matches_expected_tsv() {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ts-cognitive");
+        let table = std::fs::read_to_string(dir.join("expected.tsv")).unwrap();
+        let mut rows = 0;
+        for line in table.lines().skip(1) {
+            let cols: Vec<&str> = line.split('\t').collect();
+            let content = std::fs::read(dir.join(cols[0])).unwrap();
+            let expected: u64 = cols[2].parse().unwrap();
+            assert_eq!(
+                score(cols[0].as_bytes(), &content),
+                Ok(expected),
+                "{}",
+                cols[0]
+            );
+            rows += 1;
+        }
+        assert_eq!(rows, 4);
+    }
+}
