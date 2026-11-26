@@ -3,7 +3,7 @@
 //! лексичний контекст (рядки, шаблони, регулярні вирази) визначає парсер.
 //! Зміна правил підрахунку потребує нової версії.
 
-use crate::ts_source::{ScoreError, with_tokens};
+use crate::ts_source::{ScoreError, line_of, line_starts, with_tokens};
 
 /// Бал файла за його шляхом (лише для вибору режиму `.d.ts`) і сирим вмістом.
 pub fn score(path: &[u8], content: &[u8]) -> Result<u64, ScoreError> {
@@ -27,25 +27,6 @@ pub fn score(path: &[u8], content: &[u8]) -> Result<u64, ScoreError> {
         }
         counted
     })
-}
-
-/// Байтові зсуви початків фізичних рядків за ECMAScript: LF, CR, CRLF (один кінець),
-/// U+2028, U+2029.
-fn line_starts(text: &str) -> Vec<usize> {
-    let mut starts = vec![0];
-    let bytes = text.as_bytes();
-    for (i, c) in text.char_indices() {
-        match c {
-            '\n' | '\u{2028}' | '\u{2029}' => starts.push(i + c.len_utf8()),
-            '\r' if bytes.get(i + 1) != Some(&b'\n') => starts.push(i + 1),
-            _ => {}
-        }
-    }
-    starts
-}
-
-fn line_of(starts: &[usize], offset: usize) -> usize {
-    starts.partition_point(|&s| s <= offset) - 1
 }
 
 #[cfg(test)]

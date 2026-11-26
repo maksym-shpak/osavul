@@ -4,6 +4,7 @@ mod git_tree;
 mod local_tree;
 mod ts_cognitive;
 mod ts_cyclomatic;
+mod ts_duplication;
 mod ts_loc;
 mod ts_source;
 
