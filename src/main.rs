@@ -1,3 +1,6 @@
+//! Точка входу CLI: розбирає аргументи, передає роботу модулям аналізу та перетворює результат на
+//! вивід і код виходу. Саму аналітику й читання джерел модуль не виконує.
+
 mod complexity_report;
 mod coverage_report;
 mod duplication_report;
@@ -114,7 +117,11 @@ fn main() -> ExitCode {
     }
 }
 
-/// Розбір `coverage`: селектор джерела, далі `--lcov` (один операнд за появу) і `--tests` (один або більше).
+/// Розбирає аргументи `coverage`: селектор джерела (`--path <тека>` або ревізія), далі `--lcov` з
+/// одним операндом на кожну появу та `--tests` з одним або кількома операндами.
+///
+/// Операнди `--tests` закінчуються на першому аргументі, що починається з `--`. Хоча б один
+/// `--lcov` обов'язковий; будь-яка інша форма дає код 2.
 fn coverage(args: &[OsString]) -> ExitCode {
     let (path_mode, source, rest) = match args {
         [flag, path, rest @ ..] if flag == "--path" => (true, path, rest),
@@ -181,6 +188,8 @@ fn parse_metric(opt: &OsString, value: &OsString) -> Option<Metric> {
     }
 }
 
+/// Друкує готовий звіт у `stdout` і повертає код виходу: 0 для повного звіту, 1 для неповного, 2
+/// для помилки; тоді `stdout` порожній, а причина йде в `stderr`.
 fn emit(result: Result<complexity_report::Report, String>) -> ExitCode {
     match result {
         Ok(report) => {
@@ -198,6 +207,8 @@ fn emit(result: Result<complexity_report::Report, String>) -> ExitCode {
     }
 }
 
+/// Виконує `osavul check`: знахідки йдуть у `stdout` рядками `<шлях>:<рядок>: empty-rust-test`.
+/// Код виходу 0 — знахідок немає, 1 — є, 2 — файл не прочитано або не розібрано.
 fn check(path: &str) -> ExitCode {
     let result = std::fs::read_to_string(path)
         .map_err(|e| format!("не вдалося прочитати {path}: {e}"))

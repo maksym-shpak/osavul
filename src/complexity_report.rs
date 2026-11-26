@@ -1,4 +1,5 @@
-//! Пофайловий JSON-звіт складності `.ts` (цикломатичної або когнітивної) для коміту чи диска.
+//! Пофайловий JSON-звіт `.ts` за однією з методик `Metric` (цикломатична, когнітивна складність чи
+//! `loc`) для коміту або диска. Самі підрахунки виконують модулі методик.
 
 use serde::Serialize;
 
@@ -155,6 +156,10 @@ impl From<InputKind> for Origin<'static> {
 }
 
 /// Будує звіт із готових даних. Порядок `files` збігається з порядком входу.
+///
+/// Помилка читання чи підрахунку одного файла не скасовує інших: його запис дістає `null` замість
+/// бала та причину в `error`, `total` стає `null`, а `complete` — `false`. Порожній вхід дає повний
+/// звіт із `total` 0.
 pub fn build(origin: Origin<'_>, metric: Metric, files: Vec<FileInput>) -> Report {
     let (sha, input) = origin.fields();
     let mut records = Vec::with_capacity(files.len());
@@ -272,6 +277,7 @@ mod tests {
         assert_eq!(v["total"], 2);
     }
 
+    // Виявляє втрату запису файла з помилкою читання або повну чи нульову суму неповного звіту.
     #[test]
     fn read_error_keeps_path_and_makes_report_incomplete() {
         let report = build(
@@ -295,6 +301,7 @@ mod tests {
         assert_eq!(v["files"][1]["error"], "read-error");
     }
 
+    // Виявляє пошкодження шляху при екрануванні та розрив одного рядка JSON переносом у шляху.
     #[test]
     fn utf8_path_is_escaped_and_roundtrips() {
         let path = "q\"\\\n\u{1}є.ts";
@@ -305,6 +312,7 @@ mod tests {
         assert!(json(&report)["files"][0].get("pathBytes").is_none());
     }
 
+    // Виявляє втрату байтів шляху не в UTF-8: `path` лишається `null`, а байти йдуть у `pathBytes`.
     #[test]
     fn non_utf8_path_uses_path_bytes_after_null_path() {
         let report = build(

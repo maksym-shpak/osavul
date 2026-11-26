@@ -106,6 +106,10 @@ fn union_len(mut ranges: Vec<(usize, usize)>) -> u64 {
 }
 
 /// Будує звіт із готових даних. Порядок `files` збігається з порядком входу.
+///
+/// Файл, який не вдалося прочитати чи розібрати, дістає `null` у числах і причину в `error`, а
+/// `complete` і `total` стають `false` та `null`. Решта файлів однаково беруть участь у пошуку
+/// дублів.
 pub fn build(origin: Origin<'_>, files: Vec<FileInput>) -> Report {
     let (sha, input) = origin.fields();
 
@@ -303,6 +307,7 @@ mod tests {
         assert_eq!(json(&report)["files"][0]["lines"], 2);
     }
 
+    // Виявляє зсув округлення густини: точна половина десятої має йти вгору, а не відкидатися.
     #[test]
     fn density_rounds_half_up_to_tenths() {
         assert_eq!(density_tenths(1, 16), 63);
@@ -310,7 +315,7 @@ mod tests {
         assert_eq!(density_tenths(5, 5), 1000);
         assert_eq!(density_tenths(1, 3), 333);
         assert_eq!(density_tenths(1, 8), 125);
-        // Точна половина десятої: 1/16 % ... 1 із 2000 рядків = 0.05 % → 0.1.
+        // Точна половина десятої округлюється вгору: 1 із 2000 рядків — це 0.05 %, тобто 0.1.
         assert_eq!(density_tenths(1, 2000), 1);
     }
 
@@ -350,6 +355,8 @@ mod tests {
         assert_eq!(v["total"]["duplicatedFiles"], 1);
     }
 
+    // Виявляє порушення порядку файлів, блоків і груп (шлях за байтами) та недетермінізм: два
+    // побудови з однаковим входом мають дати однакові байти.
     #[test]
     fn files_blocks_and_groups_are_sorted_with_path_bytes() {
         let b = block("a");
@@ -384,6 +391,8 @@ mod tests {
         assert_eq!(report.json, again.json);
     }
 
+    // Виявляє втрату дублів зі справних файлів поруч із помилковими, хибний повний звіт та підміну
+    // `null` у числах помилкового файла.
     #[test]
     fn errors_keep_nulls_next_to_valid_groups() {
         let b = block("a");
