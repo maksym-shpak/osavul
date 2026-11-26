@@ -3,6 +3,7 @@ mod empty_rust_test;
 mod git_tree;
 mod local_tree;
 mod ts_cyclomatic;
+mod ts_source;
 
 use std::env;
 use std::ffi::OsString;

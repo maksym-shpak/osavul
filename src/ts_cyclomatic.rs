@@ -1,55 +1,21 @@
 //! Методика `ts-cyclomatic` версії 1: синтаксичний підрахунок для одного файла TypeScript.
 //! Зміна правил підрахунку потребує нової версії.
 
-use oxc_allocator::Allocator;
+use crate::ts_source::{ScoreError, with_program};
 use oxc_ast::ast::{
     ArrowFunctionExpression, ConditionalExpression, DoWhileStatement, ForInStatement,
     ForOfStatement, ForStatement, Function, IfStatement, LogicalExpression, SwitchCase,
     WhileStatement,
 };
 use oxc_ast_visit::{Visit, walk};
-use oxc_parser::{ParseOptions, Parser};
-use oxc_span::SourceType;
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum ScoreError {
-    InvalidUtf8,
-    Syntax,
-}
-
-impl ScoreError {
-    /// Стабільна причина для звіту.
-    pub fn reason(&self) -> &'static str {
-        match self {
-            ScoreError::InvalidUtf8 => "invalid-utf8",
-            ScoreError::Syntax => "syntax-error",
-        }
-    }
-}
 
 /// Бал файла за його шляхом (лише для вибору режиму `.d.ts`) і сирим вмістом.
 pub fn score(path: &[u8], content: &[u8]) -> Result<u64, ScoreError> {
-    let text = std::str::from_utf8(content).map_err(|_| ScoreError::InvalidUtf8)?;
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let source_type = if path.ends_with(b".d.ts") {
-        SourceType::d_ts()
-    } else {
-        SourceType::ts()
-    };
-    let allocator = Allocator::default();
-    let ret = Parser::new(&allocator, text, source_type)
-        .with_options(ParseOptions {
-            parse_regular_expression: true,
-            ..ParseOptions::default()
-        })
-        .parse();
-    // Відновлене дерево з діагностикою теж є помилкою.
-    if !ret.diagnostics.is_empty() {
-        return Err(ScoreError::Syntax);
-    }
-    let mut counter = Counter(0);
-    counter.visit_program(&ret.program);
-    Ok(counter.0)
+    with_program(path, content, |program| {
+        let mut counter = Counter(0);
+        counter.visit_program(program);
+        counter.0
+    })
 }
 
 struct Counter(u64);
