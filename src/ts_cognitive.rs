@@ -45,7 +45,6 @@ pub fn score(path: &[u8], content: &[u8]) -> Result<u64, ScoreError> {
 struct Counter {
     total: u64,
     nesting: u64,
-    /// Чи йде обхід у тілі функції (на відміну від коду поза функціями).
     in_function: bool,
     /// Власне ім'я найближчої функції для прямої рекурсії; стрілка його не має.
     name: Option<String>,
@@ -106,7 +105,6 @@ impl Counter {
         }
     }
 
-    /// `+1 + рівень` для конструкції, що вкладається.
     fn structural(&mut self) {
         self.total += 1 + self.nesting;
     }
@@ -144,7 +142,6 @@ impl Counter {
         }
     }
 
-    // Обхід у порядку запису: бал за початок і кожну зміну виду оператора.
     fn chain<'a>(&mut self, it: &LogicalExpression<'a>, last: &mut Option<LogicalOperator>) {
         self.operand(&it.left, last);
         if *last != Some(it.operator) {
@@ -255,7 +252,6 @@ impl<'a> Visit<'a> for Counter {
         self.function(false, |c| c.function_parts(it, name, false));
     }
 
-    // Метод об'єктного літерала бере ім'я з простого необчислюваного ключа.
     fn visit_object_property(&mut self, it: &ObjectProperty<'a>) {
         if it.method
             && let PropertyKey::StaticIdentifier(id) = &it.key
