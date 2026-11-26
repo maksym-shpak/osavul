@@ -59,7 +59,7 @@ pub fn parse(bytes: &[u8]) -> Report {
             });
         } else if line == b"end_of_record" {
             report.blocks.extend(open.take());
-        } else if let Some(rest) = line.strip_prefix(b"DA:") {
+        } else if let Some(rest) = tagged(line, b"DA") {
             match open.as_mut() {
                 None => report.orphan = true,
                 Some(block) => match parse_da(rest) {
@@ -67,7 +67,7 @@ pub fn parse(bytes: &[u8]) -> Report {
                     None => block.invalid = true,
                 },
             }
-        } else if let Some(rest) = line.strip_prefix(b"BRDA:") {
+        } else if let Some(rest) = tagged(line, b"BRDA") {
             match open.as_mut() {
                 None => report.orphan = true,
                 Some(block) => match parse_brda(rest) {
@@ -79,6 +79,14 @@ pub fn parse(bytes: &[u8]) -> Report {
     }
     report.blocks.extend(open);
     report
+}
+
+/// Операнди запису `tag:`; рядок із самим `tag` без двокрапки — запис без полів (порожній операнд).
+fn tagged<'a>(line: &'a [u8], tag: &[u8]) -> Option<&'a [u8]> {
+    if line == tag {
+        return Some(b"");
+    }
+    line.strip_prefix(tag)?.strip_prefix(b":")
 }
 
 fn digits(field: &[u8]) -> bool {
@@ -284,6 +292,8 @@ mod tests {
         assert!(second.blocks.is_empty());
         // Нерозбірний запис поза блоком — теж без власника.
         assert!(parse(b"DA:x\n").orphan);
+        assert!(parse(b"DA\n").orphan);
+        assert!(parse(b"BRDA\n").orphan);
     }
 
     #[test]
@@ -297,6 +307,8 @@ mod tests {
     #[test]
     fn malformed_records_are_invalid() {
         for bad in [
+            "DA",
+            "BRDA",
             "DA:1",
             "DA:1,2,3,4",
             "DA:,1",

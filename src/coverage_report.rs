@@ -71,6 +71,9 @@ pub fn parse_tests(args: &[&OsStr]) -> Result<Vec<Vec<u8>>, String> {
     args.iter()
         .map(|arg| {
             let bytes = os_bytes(arg);
+            if bytes.is_empty() {
+                return Err("--tests: порожній шлях".to_string());
+            }
             if bytes.first() == Some(&b'/') {
                 return Err(format!(
                     "--tests: шлях має бути відносним: {}",

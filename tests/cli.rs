@@ -1212,6 +1212,7 @@ fn coverage_argument_errors_are_usage_errors() {
     assert_usage_error(&["coverage", "HEAD", "--lcov", "a", "extra"]);
     assert_usage_error(&["coverage", "--path", ".", "--lcov", "a", "--tests", "/abs"]);
     assert_usage_error(&["coverage", "--path", ".", "--lcov", "a", "--tests", "../x"]);
+    assert_usage_error(&["coverage", "--path", ".", "--lcov", "a", "--tests", ""]);
     let bad = std::ffi::OsStr::from_bytes(b"\xff");
     let out = Command::new(env!("CARGO_BIN_EXE_osavul"))
         .args(["coverage"])
