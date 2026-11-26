@@ -50,6 +50,28 @@ fn run(mut cmd: Command, what: &str) -> Result<Vec<u8>, String> {
     }
 }
 
+/// Абсолютна база зіставлення зовнішніх звітів: верхня тека робочого дерева, а для bare — тека самого репозиторію.
+/// Байти імені зберігаються, знімається лише службовий LF.
+pub fn match_root() -> Result<Vec<u8>, String> {
+    let mut cmd = git();
+    cmd.args(["rev-parse", "--is-bare-repository"]);
+    let bare = run(cmd, "не вдалося визначити тип репозиторію")?;
+    let mut cmd = git();
+    if bare.trim_ascii() == b"true" {
+        cmd.args(["rev-parse", "--absolute-git-dir"]);
+    } else {
+        cmd.args(["rev-parse", "--show-toplevel"]);
+    }
+    let mut out = run(cmd, "не вдалося визначити корінь репозиторію")?;
+    if out.last() == Some(&b'\n') {
+        out.pop();
+    }
+    if out.is_empty() {
+        return Err("не вдалося визначити корінь репозиторію: порожня відповідь".to_string());
+    }
+    Ok(out)
+}
+
 /// Розв'язує ревізію до повного SHA коміту й повертає впорядкований інвентар
 /// звичайних файлів `.ts` від кореня дерева цього коміту.
 pub fn inventory(rev: &str) -> Result<Inventory, String> {

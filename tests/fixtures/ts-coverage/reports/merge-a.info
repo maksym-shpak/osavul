@@ -1,0 +1,70 @@
+#@ base
+TN:
+SF:src/main.ts
+FN:1,main
+FNDA:1,main
+DA:2,1
+DA:3,1,c2VudA==
+DA:4,0
+DA:6,1
+BRDA:3,0,0,1
+BRDA:3,0,1,0
+LF:99
+LH:99
+BRF:99
+BRH:99
+end_of_record
+#@ repeat-1
+SF:src/main.ts
+DA:2,0
+DA:3,0
+BRDA:3,0,0,0
+end_of_record
+#@ repeat
+SF:src/main.ts
+DA:2,0
+DA:3,0
+BRDA:3,0,0,0
+end_of_record
+SF:src/main.ts
+DA:2,3
+DA:3,0
+BRDA:3,0,0,0
+BRDA:3,0,0,2
+BRDA:3,0,1,0
+end_of_record
+#@ nums
+SF:src/main.ts
+DA:8,0
+BRDA:8,10,0,1
+BRDA:8,9,0,0
+BRDA:8,x,0,0
+BRDA:8,010,0,0
+end_of_record
+#@ brda-zero
+SF:src/main.ts
+BRDA:9,0,0,0
+BRDA:9,0,1,-
+end_of_record
+#@ brda-hit
+SF:src/main.ts
+BRDA:9,0,0,4
+end_of_record
+#@ dropped
+SF:src/main.ts
+BRDA:9,0,0,0
+end_of_record
+SF:src/main.ts
+BRDA:9,0,1,0
+end_of_record
+#@ empty
+SF:src/main.ts
+end_of_record
+#@ unclosed
+SF:src/main.ts
+DA:2,1
+SF:src/main.ts
+DA:2,0
+#@ open
+SF:src/main.ts
+DA:2,1
