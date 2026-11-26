@@ -61,7 +61,6 @@ impl PathRules {
     }
 }
 
-/// Результат розбору шляху за правилами.
 #[derive(Debug, PartialEq, Eq)]
 enum Parsed<'a> {
     Relative(&'a [u8]),
@@ -602,7 +601,6 @@ mod tests {
     const ROOT: &str = "/work/corpus";
     const DEFAULT_INVENTORY: &str = "src/main.ts,src/fallback.ts,src/broken.ts,tests/example.ts";
 
-    /// Один набір входів зіставлення: правила й форми кореня, теки звіту та абсолютного `SF`.
     struct Form {
         rules: PathRules,
         /// Корінь, як його повертає канонізація.
@@ -684,7 +682,6 @@ mod tests {
         }
     }
 
-    // Виявляє приймання `--tests`, що за Windows-правилами не є відносним усередині кореня.
     #[test]
     fn windows_tests_arguments_reject_every_absolute_form() {
         let w = PathRules::Windows;
