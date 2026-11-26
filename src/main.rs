@@ -6,6 +6,8 @@ mod git_tree;
 mod lcov;
 mod local_tree;
 mod ts_cognitive;
+#[cfg(test)]
+mod ts_coverage;
 mod ts_cyclomatic;
 mod ts_duplication;
 mod ts_loc;

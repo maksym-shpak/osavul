@@ -33,3 +33,5 @@ brda-line-zero	line-range	reports/invalid.info#brda-line-zero	17	no	lcov-line-ou
 brda-line-over	line-range	reports/invalid.info#brda-line-over	17	no	lcov-line-out-of-range	-	-	-	-
 da-line-last	line-range	reports/invalid.info#da-line-last	17	no	-	1	0	0	0
 brda-line-last	line-range	reports/invalid.info#brda-line-last	17	no	-	1	0	1	0
+fallback	no-report	src/fallback.ts	14	no	-	7	7	0	0
+broken	no-report	src/broken.ts	2	no	syntax-error	-	-	-	-

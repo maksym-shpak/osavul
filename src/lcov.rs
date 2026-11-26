@@ -452,6 +452,9 @@ mod tests {
         for row in table.lines().skip(1) {
             let f: Vec<&str> = row.split('\t').collect();
             assert_eq!(f.len(), 10, "{row}");
+            if !f[2].contains('#') {
+                continue; // сценарій без LCOV: перевіряє ts_coverage
+            }
             let reports: Vec<Report> = f[2]
                 .split(',')
                 .map(|input| {
