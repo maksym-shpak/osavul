@@ -108,11 +108,12 @@ pub struct Group {
     pub occurrences: Vec<Occurrence>,
 }
 
-/// Група в координатах скорочених рядків (початок і довжина), до перекладу у фізичні рядки.
+/// Кандидат — інтервал `lb..rb` суфіксного масиву зі спільним префіксом довжиною `len` рядків.
+/// Старти не копіюються: на періодичних входах вкладені інтервали разом мали б квадратний обсяг.
 struct Candidate {
     len: usize,
-    /// (файл, індекс першого рядка), за зростанням позиції в суфіксному масиві.
-    starts: Vec<(usize, usize)>,
+    lb: usize,
+    rb: usize,
 }
 
 /// Шукає групи клонів між усіма файлами й усередині кожного.
@@ -177,12 +178,8 @@ fn find_groups_with<S: std::hash::BuildHasher>(files: &[&Prepared], hasher: S) -
             stack.pop();
             lb = b;
             if l >= MIN_ROWS && weight[sa[b] + l] - weight[sa[b]] >= MIN_TOKENS {
-                let starts: Vec<usize> = sa[b..i].to_vec();
-                if left_differs(&starts) {
-                    candidates.push(Candidate {
-                        len: l,
-                        starts: starts.iter().map(|&p| origin[p]).collect(),
-                    });
+                if left_differs(&sa[b..i]) {
+                    candidates.push(Candidate { len: l, lb: b, rb: i });
                 }
             }
         }
@@ -191,17 +188,25 @@ fn find_groups_with<S: std::hash::BuildHasher>(files: &[&Prepared], hasher: S) -
         }
     }
 
-    let kept = drop_contained(&mut candidates, files.len());
-    let mut groups: Vec<Group> = kept
-        .into_iter()
-        .map(|c| {
-            let mut occurrences: Vec<Occurrence> = c
-                .starts
+    let mut rank = vec![0usize; n];
+    for (i, &p) in sa.iter().enumerate() {
+        rank[p] = i;
+    }
+    let dropped = drop_contained(&candidates, &sa, &rank, &origin);
+    let mut groups: Vec<Group> = candidates
+        .iter()
+        .zip(dropped)
+        .filter(|(_, d)| !d)
+        .map(|(c, _)| {
+            let mut occurrences: Vec<Occurrence> = sa[c.lb..c.rb]
                 .iter()
-                .map(|&(file, s)| Occurrence {
-                    file,
-                    start_line: files[file].rows[s].start_line,
-                    end_line: files[file].rows[s + c.len - 1].end_line,
+                .map(|&p| {
+                    let (file, s) = origin[p];
+                    Occurrence {
+                        file,
+                        start_line: files[file].rows[s].start_line,
+                        end_line: files[file].rows[s + c.len - 1].end_line,
+                    }
                 })
                 .collect();
             occurrences.sort();
@@ -212,61 +217,76 @@ fn find_groups_with<S: std::hash::BuildHasher>(files: &[&Prepared], hasher: S) -
     groups
 }
 
-/// Відкидає групу, всі входження якої покриті входженнями однієї довшої групи з тим самим
-/// набором файлів.
-fn drop_contained(candidates: &mut Vec<Candidate>, file_count: usize) -> Vec<Candidate> {
-    candidates.sort_by_key(|a| std::cmp::Reverse(a.len));
+const NONE: usize = usize::MAX;
+
+/// Позначає групи, усі входження яких покриті входженнями однієї довшої групи з тим самим
+/// набором файлів. Інтервали утворюють лам'яну родину (дерево), тому групи, що мають
+/// входження на заданій позиції, — це предки листка цієї позиції; старти не розгортаються.
+fn drop_contained(
+    candidates: &[Candidate],
+    sa: &[usize],
+    rank: &[usize],
+    origin: &[(usize, usize)],
+) -> Vec<bool> {
+    let n = sa.len();
+    let mut order: Vec<usize> = (0..candidates.len()).collect();
+    order.sort_by_key(|&c| (candidates[c].lb, std::cmp::Reverse(candidates[c].rb)));
+    let mut parent = vec![NONE; candidates.len()];
+    let mut deepest = vec![NONE; n];
+    let mut open: Vec<usize> = Vec::new();
+    let mut next = 0;
+    for (r, slot) in deepest.iter_mut().enumerate() {
+        while open.last().is_some_and(|&c| candidates[c].rb <= r) {
+            open.pop();
+        }
+        while next < order.len() && candidates[order[next]].lb == r {
+            let c = order[next];
+            parent[c] = open.last().copied().unwrap_or(NONE);
+            open.push(c);
+            next += 1;
+        }
+        *slot = open.last().copied().unwrap_or(NONE);
+    }
+
     let file_set = |c: &Candidate| -> Vec<usize> {
-        let mut v: Vec<usize> = c.starts.iter().map(|s| s.0).collect();
+        let mut v: Vec<usize> = sa[c.lb..c.rb].iter().map(|&p| origin[p].0).collect();
         v.sort_unstable();
         v.dedup();
         v
     };
-    let sets: Vec<Vec<usize>> = candidates.iter().map(file_set).collect();
-    // Входження за файлами: (початок, кінець включно, номер групи), за початком.
-    let mut per_file: Vec<Vec<(usize, usize, usize)>> = vec![Vec::new(); file_count];
-    for (g, c) in candidates.iter().enumerate() {
-        for &(f, s) in &c.starts {
-            per_file[f].push((s, s + c.len - 1, g));
-        }
-    }
-    for list in &mut per_file {
-        list.sort_unstable();
-    }
-    let covers = |h: usize, g: usize| -> bool {
-        let (hc, gc) = (&candidates[h], &candidates[g]);
-        gc.starts.iter().all(|&(f, t)| {
-            hc.starts
-                .iter()
-                .any(|&(hf, hs)| hf == f && hs <= t && t + gc.len <= hs + hc.len)
+    // Кожне входження `g` лежить у якомусь входженні `h`: старт `h` — на `d` рядків лівіше.
+    let covers = |h: &Candidate, g: &Candidate| -> bool {
+        sa[g.lb..g.rb].iter().all(|&q| {
+            let reach = origin[q].1.min(h.len - g.len);
+            (0..=reach).any(|d| (h.lb..h.rb).contains(&rank[q - d]))
         })
     };
+
     let mut dropped = vec![false; candidates.len()];
-    for g in 0..candidates.len() {
-        let len = candidates[g].len;
-        let (f, t) = candidates[g].starts[0];
-        let list = &per_file[f];
-        let upto = list.partition_point(|e| e.0 <= t);
-        let mut tried: Vec<usize> = Vec::new();
-        for &(_, end, h) in &list[..upto] {
-            if end + 1 >= t + len
-                && candidates[h].len > len
-                && sets[h] == sets[g]
-                && !tried.contains(&h)
-            {
-                tried.push(h);
-                if covers(h, g) {
-                    dropped[g] = true;
+    let mut stamp = vec![NONE; candidates.len()];
+    for (g, gc) in candidates.iter().enumerate() {
+        let t0 = sa[gc.lb];
+        let mut g_set: Option<Vec<usize>> = None;
+        'search: for d in 0..=origin[t0].1 {
+            let mut h = deepest[rank[t0 - d]];
+            while h != NONE {
+                let hc = &candidates[h];
+                if hc.len < gc.len + d {
                     break;
                 }
+                if hc.len > gc.len && stamp[h] != g {
+                    stamp[h] = g;
+                    let gs = g_set.get_or_insert_with(|| file_set(gc));
+                    if file_set(hc) == *gs && covers(hc, gc) {
+                        dropped[g] = true;
+                        break 'search;
+                    }
+                }
+                h = parent[h];
             }
         }
     }
-    let all = std::mem::take(candidates);
-    all.into_iter()
-        .zip(dropped)
-        .filter_map(|(c, d)| (!d).then_some(c))
-        .collect()
+    dropped
 }
 
 /// Суфіксний масив подвоєнням префіксів.
@@ -389,6 +409,7 @@ fn is_member_of_require(expr: &Expression<'_>) -> bool {
     match expr.without_parentheses() {
         Expression::StaticMemberExpression(m) => is_require_call(&m.object),
         Expression::ComputedMemberExpression(m) => is_require_call(&m.object),
+        Expression::PrivateFieldExpression(m) => is_require_call(&m.object),
         _ => false,
     }
 }
@@ -536,6 +557,15 @@ mod tests {
         // Destructuring і анотація типу — теж оголошення з одним декларатором.
         assert_eq!(flat("const { a } = require('a');\nlet x;"), "let x ;");
         assert_eq!(flat("const v: T = require('a');\nlet x;"), "let x ;");
+    }
+
+    #[test]
+    fn require_private_member_declarations_are_removed() {
+        for init in ["require('a').#m", "require('a').#m()", "(require('a')).#m"] {
+            let src = format!("class C {{ #m; f() {{ const v = {init};\nlet x; }} }}");
+            assert!(!flat(&src).contains("require"), "{src}");
+            assert!(flat(&src).contains("let x"), "{src}");
+        }
     }
 
     #[test]
@@ -762,6 +792,15 @@ mod tests {
             let p = block("p", 10);
             let f = make(&[&p, &p, &p, &p, &p, &p]);
             assert_eq!(occs(&run(&[f])), [[(0, 0, 49), (0, 10, 59)]]);
+        }
+
+        #[test]
+        fn periodic_input_yields_one_group() {
+            let rows: Vec<(&str, usize)> = (0..1500)
+                .map(|i| if i % 2 == 0 { ("a", 10) } else { ("b", 10) })
+                .collect();
+            let groups = run(&[file(&rows)]);
+            assert_eq!(occs(&groups), [[(0, 0, 1497), (0, 2, 1499)]]);
         }
 
         #[test]
