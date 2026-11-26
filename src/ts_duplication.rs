@@ -177,10 +177,11 @@ fn find_groups_with<S: std::hash::BuildHasher>(files: &[&Prepared], hasher: S) -
             }
             stack.pop();
             lb = b;
-            if l >= MIN_ROWS && weight[sa[b] + l] - weight[sa[b]] >= MIN_TOKENS {
-                if left_differs(&sa[b..i]) {
-                    candidates.push(Candidate { len: l, lb: b, rb: i });
-                }
+            if l >= MIN_ROWS
+                && weight[sa[b] + l] - weight[sa[b]] >= MIN_TOKENS
+                && left_differs(&sa[b..i])
+            {
+                candidates.push(Candidate { len: l, lb: b, rb: i });
             }
         }
         if stack.last().is_none_or(|t| t.0 < cur) {
