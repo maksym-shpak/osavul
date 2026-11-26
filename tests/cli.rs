@@ -37,6 +37,7 @@ fn help_is_stable_and_lists_all_invocations() {
     assert!(text.contains("osavul complexity <ревізія>"));
     assert!(text.contains("osavul complexity --path <файл-або-тека>"));
     assert!(text.contains("Git не потрібен"));
+    assert!(text.contains("--metric <cyclomatic|cognitive>"));
     assert!(text.contains("Коди завершення complexity"));
     assert_eq!(first.stdout, second.stdout);
 }
@@ -76,7 +77,8 @@ fn complexity_without_revision_is_usage_error() {
 }
 
 fn temp_file(name: &str, content: &[u8]) -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("check-{}", std::process::id()));
+    let dir =
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("check-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     let path = dir.join(name);
     fs::write(&path, content).unwrap();
@@ -115,7 +117,10 @@ fn corpus_matches_expected_tsv() {
         let path = format!("{dir}/{}", f[0]);
         let (code, expected) = match f[2] {
             "[]" => (0, String::new()),
-            l => (1, format!("{path}:{}: empty-rust-test\n", &l[1..l.len() - 1])),
+            l => (
+                1,
+                format!("{path}:{}: empty-rust-test\n", &l[1..l.len() - 1]),
+            ),
         };
         let first = run(&["check", &path]);
         let second = run(&["check", &path]);
@@ -137,7 +142,10 @@ fn two_findings_in_order_with_crlf_and_multiline_attribute() {
     let p = format!("./{}", path.file_name().unwrap().to_str().unwrap());
     let out = run_in(path.parent(), &["check", &p]);
     assert_eq!(out.status.code(), Some(1));
-    assert_eq!(out.stdout, format!("{p}:3: empty-rust-test\n{p}:10: empty-rust-test\n").as_bytes());
+    assert_eq!(
+        out.stdout,
+        format!("{p}:3: empty-rust-test\n{p}:10: empty-rust-test\n").as_bytes()
+    );
     assert!(out.stderr.is_empty());
 }
 
@@ -153,7 +161,10 @@ fn embedded_modules_count_but_other_items_do_not() {
         #[test] async fn c() {}\n#[test] const fn d() {}\n#[test] unsafe fn e() {}\n#[test] extern \"C\" fn f() {}\n\
         struct S;\nimpl S { #[test] fn g() {} }\nfn h() { #[test] fn i() {} }\n";
     let (code, out) = check_src("mods.rs", src);
-    assert_eq!((code, out.as_str()), (1, "P:2: empty-rust-test\nP:7: empty-rust-test\n"));
+    assert_eq!(
+        (code, out.as_str()),
+        (1, "P:2: empty-rust-test\nP:7: empty-rust-test\n")
+    );
 }
 
 #[test]
@@ -195,11 +206,23 @@ fn extra_attributes_and_non_empty_bodies_do_not_match() {
 fn signature_macros_and_unicode_names_and_multiline_inner_attribute() {
     let cases = [
         ("#[test]\nfn a() -> unit! {} { helper() }", (0, "")),
-        ("#[test]\nfn a() -> as_type! { () } {}", (1, "P:2: empty-rust-test\n")),
+        (
+            "#[test]\nfn a() -> as_type! { () } {}",
+            (1, "P:2: empty-rust-test\n"),
+        ),
         ("#[test]\nfn a() -> ! {}", (1, "P:2: empty-rust-test\n")),
-        ("mod परीक्षा {\n#[test]\nfn a() {}\n}", (1, "P:3: empty-rust-test\n")),
-        ("#!\n[allow(dead_code)]\n#[test]\nfn a() {}\n", (1, "P:4: empty-rust-test\n")),
-        ("#! /* c */\n// d\n[allow(dead_code)]\n#[test]\nfn a() {}\n", (1, "P:5: empty-rust-test\n")),
+        (
+            "mod परीक्षा {\n#[test]\nfn a() {}\n}",
+            (1, "P:3: empty-rust-test\n"),
+        ),
+        (
+            "#!\n[allow(dead_code)]\n#[test]\nfn a() {}\n",
+            (1, "P:4: empty-rust-test\n"),
+        ),
+        (
+            "#! /* c */\n// d\n[allow(dead_code)]\n#[test]\nfn a() {}\n",
+            (1, "P:5: empty-rust-test\n"),
+        ),
     ];
     for (src, (code, out)) in cases {
         assert_eq!(check_src("sig.rs", src), (code, out.to_string()), "{src}");
@@ -208,14 +231,21 @@ fn signature_macros_and_unicode_names_and_multiline_inner_attribute() {
 
 #[test]
 fn late_expression_error_leaves_no_partial_report() {
-    let path = temp_file("late.rs", b"#[test]\nfn a() {}\nfn b() { let x = (1 +); }\n");
+    let path = temp_file(
+        "late.rs",
+        b"#[test]\nfn a() {}\nfn b() { let x = (1 +); }\n",
+    );
     assert_check_error(&["check", path.to_str().unwrap()]);
 }
 
 #[test]
 fn external_module_and_unexpanded_macro_need_nothing_else() {
-    let src = "mod missing;\ncompile_error!(\"no\");\nfn typed() -> u8 { \"x\" }\n#[test]\nfn a() {}\n";
-    assert_eq!(check_src("ext.rs", src), (1, "P:5: empty-rust-test\n".into()));
+    let src =
+        "mod missing;\ncompile_error!(\"no\");\nfn typed() -> u8 { \"x\" }\n#[test]\nfn a() {}\n";
+    assert_eq!(
+        check_src("ext.rs", src),
+        (1, "P:5: empty-rust-test\n".into())
+    );
 }
 
 #[test]
@@ -224,7 +254,6 @@ fn read_errors_exit_with_two() {
     let path = temp_file("bad_utf8.rs", &[0xff, 0xfe, b'f']);
     assert_check_error(&["check", path.to_str().unwrap()]);
 }
-
 
 const FIXTURES: &str = "tests/fixtures/ts-cyclomatic";
 
@@ -253,7 +282,8 @@ struct Repo {
 
 impl Repo {
     fn new(name: &str) -> Repo {
-        let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("cx-{}-{name}", std::process::id()));
+        let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("cx-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let root = base.join("repo");
         let home = base.join("home");
@@ -269,7 +299,11 @@ impl Repo {
         cmd.args(args).current_dir(&self.root);
         isolate(&mut cmd, &self.home);
         let out = cmd.output().unwrap();
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8(out.stdout).unwrap().trim().to_string()
     }
 
@@ -297,7 +331,10 @@ impl Repo {
     }
 
     fn loose_object(&self, oid: &str) -> PathBuf {
-        self.root.join(".git/objects").join(&oid[..2]).join(&oid[2..])
+        self.root
+            .join(".git/objects")
+            .join(&oid[..2])
+            .join(&oid[2..])
     }
 }
 
@@ -311,7 +348,12 @@ fn pairs(v: &serde_json::Value) -> Vec<(String, serde_json::Value)> {
         .as_array()
         .unwrap()
         .iter()
-        .map(|f| (f["path"].as_str().unwrap().to_string(), f["cyclomatic"].clone()))
+        .map(|f| {
+            (
+                f["path"].as_str().unwrap().to_string(),
+                f["cyclomatic"].clone(),
+            )
+        })
         .collect()
 }
 
@@ -327,7 +369,10 @@ fn corpus_pair_matches_expected_scores_through_cli() {
     for row in rows {
         let f: Vec<&str> = row.split('\t').collect();
         repo.write(f[0], &fs::read(format!("{FIXTURES}/{}", f[0])).unwrap());
-        expected.push((f[0].to_string(), serde_json::json!(f[2].parse::<u64>().unwrap())));
+        expected.push((
+            f[0].to_string(),
+            serde_json::json!(f[2].parse::<u64>().unwrap()),
+        ));
     }
     assert_eq!(expected.len(), 2);
     expected.sort_by(|a, b| a.0.cmp(&b.0));
@@ -358,7 +403,12 @@ fn old_commit_inventory_ignores_later_and_local_changes() {
         repo.write(skipped, IF_ELSE.as_bytes());
     }
     std::os::unix::fs::symlink("a.ts", repo.root.join("link.ts")).unwrap();
-    repo.git(&["update-index", "--add", "--cacheinfo", "160000,1111111111111111111111111111111111111111,sub.ts"]);
+    repo.git(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        "160000,1111111111111111111111111111111111111111,sub.ts",
+    ]);
     repo.git(&["add", "-A"]);
     repo.git(&["update-index", "--chmod=+x", "run.ts"]);
     repo.git(&["commit", "-q", "-m", "one"]);
@@ -380,8 +430,10 @@ fn old_commit_inventory_ignores_later_and_local_changes() {
         ("src/deep/x.test.ts", 1),
         ("types.d.ts", 0),
     ];
-    let expected: Vec<(String, serde_json::Value)> =
-        expected.into_iter().map(|(p, n)| (p.to_string(), serde_json::json!(n))).collect();
+    let expected: Vec<(String, serde_json::Value)> = expected
+        .into_iter()
+        .map(|(p, n)| (p.to_string(), serde_json::json!(n)))
+        .collect();
     for rev in [old.as_str(), &old[..10], "main~1"] {
         let out = repo.run(&repo.root.join("src/deep"), &["complexity", rev]);
         assert_eq!(out.status.code(), Some(0), "{rev}");
@@ -433,7 +485,11 @@ fn single_operand_with_leading_dash_is_a_revision() {
             assert_eq!(json_of(&out)["sha"], sha.as_str());
         } else {
             assert_eq!(out.status.code(), Some(2));
-            assert!(!String::from_utf8(out.stderr).unwrap().contains("osavul --help"));
+            assert!(
+                !String::from_utf8(out.stderr)
+                    .unwrap()
+                    .contains("osavul --help")
+            );
         }
     }
     // Іменем файла операнд не стає локальним входом.
@@ -534,8 +590,14 @@ fn unknown_revision_outside_repository_and_missing_git_are_fatal() {
     let by_message = repo.complexity(":/first release");
     assert_eq!(by_message.status.code(), Some(0));
     assert_eq!(json_of(&by_message)["sha"], second.as_str());
-    assert_eq!(json_of(&repo.complexity("refs/heads/release"))["sha"], second.as_str());
-    assert_eq!(json_of(&repo.complexity("refs/tags/release"))["sha"], repo.git(&["rev-parse", "HEAD~1"]).as_str());
+    assert_eq!(
+        json_of(&repo.complexity("refs/heads/release"))["sha"],
+        second.as_str()
+    );
+    assert_eq!(
+        json_of(&repo.complexity("refs/tags/release"))["sha"],
+        repo.git(&["rev-parse", "HEAD~1"]).as_str()
+    );
     let outside = {
         let dir = repo.home.join("outside");
         fs::create_dir_all(&dir).unwrap();
@@ -549,7 +611,9 @@ fn unknown_revision_outside_repository_and_missing_git_are_fatal() {
         let empty = repo.home.join("empty-path");
         fs::create_dir_all(&empty).unwrap();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
-        cmd.args(["complexity", "HEAD"]).current_dir(&repo.root).env("PATH", &empty);
+        cmd.args(["complexity", "HEAD"])
+            .current_dir(&repo.root)
+            .env("PATH", &empty);
         cmd.output().unwrap()
     };
     for out in [&unknown, &ambiguous, &outside, &no_git] {
@@ -572,7 +636,11 @@ fn partial_clone_does_not_fetch_missing_blobs() {
         .arg(&clone);
     isolate(&mut cmd, &source.home);
     let out = cmd.output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let out = source.run(&clone, &["complexity", "HEAD"]);
     assert_eq!(out.status.code(), Some(1));
@@ -580,11 +648,15 @@ fn partial_clone_does_not_fetch_missing_blobs() {
     assert_eq!(v["files"][0]["error"], "read-error");
     assert!(v["total"].is_null());
     let mut cmd = Command::new("git");
-    cmd.args(["rev-list", "--objects", "--missing=print", "HEAD"]).current_dir(&clone);
+    cmd.args(["rev-list", "--objects", "--missing=print", "HEAD"])
+        .current_dir(&clone);
     isolate(&mut cmd, &source.home);
     cmd.env("GIT_NO_LAZY_FETCH", "1");
     let listing = String::from_utf8(cmd.output().unwrap().stdout).unwrap();
-    assert!(listing.lines().any(|l| l.starts_with('?')), "blob must stay missing: {listing}");
+    assert!(
+        listing.lines().any(|l| l.starts_with('?')),
+        "blob must stay missing: {listing}"
+    );
 }
 
 #[test]
@@ -595,7 +667,12 @@ fn stdout_write_failure_is_fatal() {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
     cmd.args(["complexity", "HEAD"])
         .current_dir(&repo.root)
-        .stdout(fs::OpenOptions::new().write(true).open("/dev/full").unwrap());
+        .stdout(
+            fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .unwrap(),
+        );
     isolate(&mut cmd, &repo.home);
     let out = cmd.output().unwrap();
     assert_eq!(out.status.code(), Some(2));
@@ -622,7 +699,10 @@ fn local_dir(name: &str) -> PathBuf {
 }
 
 fn set_mode(path: &Path, mode: u32) {
-    std::os::unix::fs::PermissionsExt::set_mode(&mut fs::metadata(path).unwrap().permissions(), mode);
+    std::os::unix::fs::PermissionsExt::set_mode(
+        &mut fs::metadata(path).unwrap().permissions(),
+        mode,
+    );
     fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode)).unwrap();
 }
 
@@ -678,10 +758,15 @@ fn local_corpus_works_outside_git_for_files_and_directory() {
         assert!(v["sha"].is_null());
         assert_eq!(v["scope"]["input"], input);
         assert_eq!(v["complete"], true);
-        let expected: Vec<(String, serde_json::Value)> =
-            expected.into_iter().map(|(p, n)| (p.to_string(), serde_json::json!(n))).collect();
+        let expected: Vec<(String, serde_json::Value)> = expected
+            .into_iter()
+            .map(|(p, n)| (p.to_string(), serde_json::json!(n)))
+            .collect();
         assert_eq!(pairs(&v), expected);
-        assert_eq!(v["total"], expected.iter().map(|e| e.1.as_u64().unwrap()).sum::<u64>());
+        assert_eq!(
+            v["total"],
+            expected.iter().map(|e| e.1.as_u64().unwrap()).sum::<u64>()
+        );
     }
 }
 
@@ -692,14 +777,25 @@ fn local_empty_selection_is_complete_zero() {
     let out = local_run(&dir, &["complexity", "--path", "."], false);
     assert_eq!(out.status.code(), Some(0));
     let v = json_of(&out);
-    assert_eq!((v["files"].as_array().unwrap().len(), v["complete"].clone(), v["total"].clone()), (0, true.into(), 0.into()));
+    assert_eq!(
+        (
+            v["files"].as_array().unwrap().len(),
+            v["complete"].clone(),
+            v["total"].clone()
+        ),
+        (0, true.into(), 0.into())
+    );
 }
 
 #[test]
 fn local_non_utf8_name_is_reported_as_path_bytes() {
     use std::os::unix::ffi::OsStrExt;
     let dir = local_dir("bytes");
-    fs::write(dir.join(std::ffi::OsStr::from_bytes(b"\xff.ts")), b"function f() {}\n").unwrap();
+    fs::write(
+        dir.join(std::ffi::OsStr::from_bytes(b"\xff.ts")),
+        b"function f() {}\n",
+    )
+    .unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
     cmd.args(["complexity", "--path"]).arg(&dir);
     let out = cmd.output().unwrap();
@@ -708,7 +804,8 @@ fn local_non_utf8_name_is_reported_as_path_bytes() {
     assert!(v["files"][0]["path"].is_null());
     assert_eq!(v["files"][0]["pathBytes"], "ff2e7473");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
-    cmd.args(["complexity", "--path"]).arg(dir.join(std::ffi::OsStr::from_bytes(b"\xff.ts")));
+    cmd.args(["complexity", "--path"])
+        .arg(dir.join(std::ffi::OsStr::from_bytes(b"\xff.ts")));
     let single = cmd.output().unwrap();
     assert_eq!(single.status.code(), Some(0));
     assert_eq!(json_of(&single)["files"][0]["pathBytes"], "ff2e7473");
@@ -733,14 +830,24 @@ fn local_mixed_failures_report_each_reason_and_keep_later_files() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|f| (f["path"].as_str().unwrap().to_string(), f["cyclomatic"].clone(), f.get("error").cloned()))
+        .map(|f| {
+            (
+                f["path"].as_str().unwrap().to_string(),
+                f["cyclomatic"].clone(),
+                f.get("error").cloned(),
+            )
+        })
         .collect();
     let null = serde_json::Value::Null;
     assert_eq!(
         got,
         vec![
             ("a_zero.ts".to_string(), 0.into(), None),
-            ("b_syntax.ts".to_string(), null.clone(), Some("syntax-error".into())),
+            (
+                "b_syntax.ts".to_string(),
+                null.clone(),
+                Some("syntax-error".into())
+            ),
             ("c_utf8.ts".to_string(), null, Some("invalid-utf8".into())),
             ("d_ok.ts".to_string(), 1.into(), None),
         ]
@@ -757,7 +864,11 @@ fn assert_fatal(out: &Output) {
 fn local_fatal_inputs_have_empty_stdout() {
     let dir = local_dir("fatal");
     fs::write(dir.join("a.txt"), b"x").unwrap();
-    assert_fatal(&local_run(&dir, &["complexity", "--path", "missing.ts"], false));
+    assert_fatal(&local_run(
+        &dir,
+        &["complexity", "--path", "missing.ts"],
+        false,
+    ));
     assert_fatal(&local_run(&dir, &["complexity", "--path", "a.txt"], false));
 }
 
@@ -771,7 +882,12 @@ fn local_unreadable_file_keeps_record_and_scores_the_next_file() {
         set_mode(&dir.join(f), 0o644);
     }
     let control = local_run(&dir, &["complexity", "--path", "."], true);
-    assert_eq!(control.status.code(), Some(0), "{}", String::from_utf8_lossy(&control.stderr));
+    assert_eq!(
+        control.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&control.stderr)
+    );
     set_mode(&dir.join("b.ts"), 0o000);
     let out = local_run(&dir, &["complexity", "--path", "."], true);
     assert_eq!(out.status.code(), Some(1));
@@ -796,9 +912,153 @@ fn local_unlistable_nested_directory_is_fatal_even_after_good_files() {
     fs::write(sub.join("b.ts"), b"function b() {}\n").unwrap();
     set_mode(&sub.join("b.ts"), 0o644);
     let control = local_run(&dir, &["complexity", "--path", "."], true);
-    assert_eq!(control.status.code(), Some(0), "{}", String::from_utf8_lossy(&control.stderr));
+    assert_eq!(
+        control.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&control.stderr)
+    );
     set_mode(&sub, 0o000);
     let out = local_run(&dir, &["complexity", "--path", "."], true);
     set_mode(&sub, 0o755);
     assert_fatal(&out);
+}
+
+const ONE_IF: &str = "export function f(x: number) { if (x) { return 1; } }\n";
+
+#[test]
+fn metric_option_errors_are_usage_errors_before_source_access() {
+    for args in [
+        &["complexity", "HEAD", "--metric"][..],
+        &["complexity", "HEAD", "--metric", "other"],
+        &["complexity", "HEAD", "--metric", "Cognitive"],
+        &[
+            "complexity",
+            "HEAD",
+            "--metric",
+            "cognitive",
+            "--metric",
+            "cognitive",
+        ],
+        &["complexity", "HEAD", "--metric", "cognitive", "extra"],
+        &["complexity", "HEAD", "--metrics", "cognitive"],
+        &["complexity", "--path", "a.ts", "--metric"],
+        &["complexity", "--path", "a.ts", "--metric", "other"],
+        &[
+            "complexity",
+            "--path",
+            "a.ts",
+            "--metric",
+            "cognitive",
+            "extra",
+        ],
+    ] {
+        assert_usage_error(args);
+    }
+}
+
+#[test]
+fn metric_value_outside_utf8_is_usage_error() {
+    use std::os::unix::ffi::OsStrExt;
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
+    cmd.args(["complexity", "HEAD", "--metric"])
+        .arg(std::ffi::OsStr::from_bytes(b"cog\xffnitive"));
+    let out = cmd.output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    assert!(
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .contains("osavul --help")
+    );
+}
+
+#[test]
+fn bare_metric_operand_is_a_revision() {
+    let repo = Repo::new("metric-operand");
+    repo.write("a.ts", ONE_IF.as_bytes());
+    let sha = repo.commit("one");
+    repo.git(&["update-ref", "refs/heads/--metric", &sha]);
+    let out = repo.complexity("--metric");
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(json_of(&out)["sha"], sha.as_str());
+}
+
+#[test]
+fn commit_metric_selects_methodology_and_score_key() {
+    let repo = Repo::new("metric-commit");
+    repo.write("a.ts", ONE_IF.as_bytes());
+    repo.commit("one");
+    let out = repo.run(&repo.root, &["complexity", "HEAD", "--metric", "cognitive"]);
+    assert_eq!(out.status.code(), Some(0));
+    let v = json_of(&out);
+    assert_eq!(
+        v["methodology"],
+        serde_json::json!({"id": "ts-cognitive", "version": 1})
+    );
+    assert_eq!(v["files"][0]["cognitive"], 1);
+    assert!(v["files"][0].get("cyclomatic").is_none());
+    assert_eq!(v["total"], 1);
+
+    let implicit = repo.complexity("HEAD");
+    let explicit = repo.run(
+        &repo.root,
+        &["complexity", "HEAD", "--metric", "cyclomatic"],
+    );
+    assert_eq!(implicit.status.code(), Some(0));
+    assert_eq!(implicit.status.code(), explicit.status.code());
+    assert_eq!(implicit.stdout, explicit.stdout);
+    let v = json_of(&implicit);
+    assert_eq!(v["methodology"]["id"], "ts-cyclomatic");
+    assert_eq!(v["files"][0]["cyclomatic"], 2);
+}
+
+#[test]
+fn local_metric_selects_methodology_and_score_key() {
+    let dir = local_dir("metric");
+    fs::write(dir.join("a.ts"), ONE_IF).unwrap();
+    let out = local_run(
+        &dir,
+        &["complexity", "--path", "a.ts", "--metric", "cognitive"],
+        false,
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let v = json_of(&out);
+    assert_eq!(
+        v["methodology"],
+        serde_json::json!({"id": "ts-cognitive", "version": 1})
+    );
+    assert_eq!(v["files"][0]["cognitive"], 1);
+    assert!(v["files"][0].get("cyclomatic").is_none());
+    assert_eq!(v["total"], 1);
+
+    let implicit = local_run(&dir, &["complexity", "--path", "a.ts"], false);
+    let explicit = local_run(
+        &dir,
+        &["complexity", "--path", "a.ts", "--metric", "cyclomatic"],
+        false,
+    );
+    assert_eq!(implicit.status.code(), Some(0));
+    assert_eq!(implicit.status.code(), explicit.status.code());
+    assert_eq!(implicit.stdout, explicit.stdout);
+    assert_eq!(json_of(&implicit)["files"][0]["cyclomatic"], 2);
+}
+
+#[test]
+fn cognitive_file_failure_gives_incomplete_report_with_exit_one() {
+    let dir = local_dir("metric-fail");
+    fs::write(dir.join("a.ts"), b"function (").unwrap();
+    fs::write(dir.join("b.ts"), ONE_IF).unwrap();
+    let out = local_run(
+        &dir,
+        &["complexity", "--path", ".", "--metric", "cognitive"],
+        false,
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let v = json_of(&out);
+    assert_eq!(v["complete"], false);
+    assert!(v["total"].is_null());
+    assert!(v["files"][0]["cognitive"].is_null());
+    assert_eq!(v["files"][0]["error"], "syntax-error");
+    assert_eq!(v["files"][1]["cognitive"], 1);
 }

@@ -1,4 +1,3 @@
-
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -33,7 +32,8 @@ fn os_bytes(s: &std::ffi::OsStr) -> Vec<u8> {
 /// Повний відбір без читання вмісту. `Err` — фатальна відмова: повний перелік скласти неможливо.
 pub fn select(root: &Path) -> Result<(InputKind, Vec<Selected>), String> {
     // Явно вказаний корінь розіменовується, на відміну від записів усередині теки.
-    let meta = fs::metadata(root).map_err(|e| format!("не вдалося визначити тип {}: {e}", root.display()))?;
+    let meta = fs::metadata(root)
+        .map_err(|e| format!("не вдалося визначити тип {}: {e}", root.display()))?;
     if meta.is_file() {
         let name = root
             .file_name()
@@ -42,7 +42,13 @@ pub fn select(root: &Path) -> Result<(InputKind, Vec<Selected>), String> {
         if !key.ends_with(SUFFIX) {
             return Err(format!("{}: підтримується лише суфікс .ts", root.display()));
         }
-        return Ok((InputKind::File, vec![Selected { key, disk: root.to_path_buf() }]));
+        return Ok((
+            InputKind::File,
+            vec![Selected {
+                key,
+                disk: root.to_path_buf(),
+            }],
+        ));
     }
     if !meta.is_dir() {
         return Err(format!("{}: не звичайний файл і не тека", root.display()));
@@ -50,7 +56,8 @@ pub fn select(root: &Path) -> Result<(InputKind, Vec<Selected>), String> {
     let mut found = Vec::new();
     let mut stack = vec![(root.to_path_buf(), Vec::<u8>::new())];
     while let Some((dir, prefix)) = stack.pop() {
-        let entries = fs::read_dir(&dir).map_err(|e| format!("не вдалося перелічити {}: {e}", dir.display()))?;
+        let entries = fs::read_dir(&dir)
+            .map_err(|e| format!("не вдалося перелічити {}: {e}", dir.display()))?;
         for entry in entries {
             let entry = entry.map_err(|e| format!("помилка переліку {}: {e}", dir.display()))?;
             let name = entry.file_name();
@@ -66,7 +73,10 @@ pub fn select(root: &Path) -> Result<(InputKind, Vec<Selected>), String> {
                 key.push(b'/');
                 stack.push((entry.path(), key));
             } else if ty.is_file() && key.ends_with(SUFFIX) {
-                found.push(Selected { key, disk: entry.path() });
+                found.push(Selected {
+                    key,
+                    disk: entry.path(),
+                });
             }
         }
     }
@@ -79,7 +89,10 @@ pub fn collect(root: &Path) -> Result<(InputKind, Vec<FileInput>), String> {
     let (kind, selected) = select(root)?;
     let files = selected
         .into_iter()
-        .map(|s| FileInput { path: s.key, content: fs::read(&s.disk).map_err(|_| ReadError) })
+        .map(|s| FileInput {
+            path: s.key,
+            content: fs::read(&s.disk).map_err(|_| ReadError),
+        })
         .collect();
     Ok((kind, files))
 }
@@ -103,16 +116,33 @@ mod tests {
     }
 
     fn keys(root: &Path) -> Vec<String> {
-        select(root).unwrap().1.into_iter().map(|s| String::from_utf8(s.key).unwrap()).collect()
+        select(root)
+            .unwrap()
+            .1
+            .into_iter()
+            .map(|s| String::from_utf8(s.key).unwrap())
+            .collect()
     }
 
     #[test]
     fn selects_sorted_by_whole_path_bytes_and_skips_excluded_and_links() {
         let root = tree("matrix");
         for rel in [
-            "b.ts", "a.ts", "a/z.ts", "a.b/y.ts", "src/x.test.ts", "types.d.ts", "ign/ored.ts",
-            "deep/.git/h.ts", "deep/node_modules/n.ts", ".git/g.ts", "node_modules/m.ts",
-            "U.TS", "c.tsx", "d.mts", "real/inner.ts",
+            "b.ts",
+            "a.ts",
+            "a/z.ts",
+            "a.b/y.ts",
+            "src/x.test.ts",
+            "types.d.ts",
+            "ign/ored.ts",
+            "deep/.git/h.ts",
+            "deep/node_modules/n.ts",
+            ".git/g.ts",
+            "node_modules/m.ts",
+            "U.TS",
+            "c.tsx",
+            "d.mts",
+            "real/inner.ts",
         ] {
             touch(&root, rel);
         }
@@ -123,7 +153,13 @@ mod tests {
         assert_eq!(
             keys(&root),
             [
-                "a.b/y.ts", "a.ts", "a/z.ts", "b.ts", "ign/ored.ts", "real/inner.ts", "src/x.test.ts",
+                "a.b/y.ts",
+                "a.ts",
+                "a/z.ts",
+                "b.ts",
+                "ign/ored.ts",
+                "real/inner.ts",
+                "src/x.test.ts",
                 "types.d.ts"
             ]
         );
@@ -140,7 +176,10 @@ mod tests {
         symlink("real/a.ts", root.join("alias.txt")).unwrap();
         assert_eq!(keys(&root.join("dirlink")), ["a.ts"]);
         let (kind, sel) = select(&root.join("alias.ts")).unwrap();
-        assert_eq!((kind, sel[0].key.as_slice()), (InputKind::File, &b"alias.ts"[..]));
+        assert_eq!(
+            (kind, sel[0].key.as_slice()),
+            (InputKind::File, &b"alias.ts"[..])
+        );
         assert!(select(&root.join("alias.txt")).is_err());
         assert_eq!(keys(&root.join("bad.ts")), ["bad.ts"]);
     }

@@ -1,55 +1,21 @@
 //! Методика `ts-cyclomatic` версії 1: синтаксичний підрахунок для одного файла TypeScript.
 //! Зміна правил підрахунку потребує нової версії.
 
-use oxc_allocator::Allocator;
+use crate::ts_source::{ScoreError, with_program};
 use oxc_ast::ast::{
     ArrowFunctionExpression, ConditionalExpression, DoWhileStatement, ForInStatement,
     ForOfStatement, ForStatement, Function, IfStatement, LogicalExpression, SwitchCase,
     WhileStatement,
 };
 use oxc_ast_visit::{Visit, walk};
-use oxc_parser::{ParseOptions, Parser};
-use oxc_span::SourceType;
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum ScoreError {
-    InvalidUtf8,
-    Syntax,
-}
-
-impl ScoreError {
-    /// Стабільна причина для звіту.
-    pub fn reason(&self) -> &'static str {
-        match self {
-            ScoreError::InvalidUtf8 => "invalid-utf8",
-            ScoreError::Syntax => "syntax-error",
-        }
-    }
-}
 
 /// Бал файла за його шляхом (лише для вибору режиму `.d.ts`) і сирим вмістом.
 pub fn score(path: &[u8], content: &[u8]) -> Result<u64, ScoreError> {
-    let text = std::str::from_utf8(content).map_err(|_| ScoreError::InvalidUtf8)?;
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let source_type = if path.ends_with(b".d.ts") {
-        SourceType::d_ts()
-    } else {
-        SourceType::ts()
-    };
-    let allocator = Allocator::default();
-    let ret = Parser::new(&allocator, text, source_type)
-        .with_options(ParseOptions {
-            parse_regular_expression: true,
-            ..ParseOptions::default()
-        })
-        .parse();
-    // Відновлене дерево з діагностикою теж є помилкою.
-    if !ret.diagnostics.is_empty() {
-        return Err(ScoreError::Syntax);
-    }
-    let mut counter = Counter(0);
-    counter.visit_program(&ret.program);
-    Ok(counter.0)
+    with_program(path, content, |program| {
+        let mut counter = Counter(0);
+        counter.visit_program(program);
+        counter.0
+    })
 }
 
 struct Counter(u64);
@@ -129,8 +95,14 @@ mod tests {
     #[test]
     fn acceptance_examples() {
         assert_eq!(ts("function f() { return 1; }"), 1);
-        assert_eq!(ts("function f(a) { if (a) { return 1; } else { return 2; } }"), 2);
-        assert_eq!(ts("function f(a, b) { if (a && b) { return 1; } return 2; }"), 3);
+        assert_eq!(
+            ts("function f(a) { if (a) { return 1; } else { return 2; } }"),
+            2
+        );
+        assert_eq!(
+            ts("function f(a, b) { if (a && b) { return 1; } return 2; }"),
+            3
+        );
         assert_eq!(score(b"a.d.ts", b"declare function f(): void;"), Ok(0));
         assert_eq!(ts("const x = a ? 1 : 2;"), 1);
         assert_eq!(ts("switch (a) { case 1: break; default: break; }"), 2);
@@ -148,7 +120,9 @@ mod tests {
         assert_eq!(ts("const f = function () {};"), 1);
         assert_eq!(ts("const f = () => 1; const g = () => { return 1; };"), 2);
         assert_eq!(
-            ts("class A { constructor() {} m() {} get x() { return 1; } set x(v) {} static s() {} }"),
+            ts(
+                "class A { constructor() {} m() {} get x() { return 1; } set x(v) {} static s() {} }"
+            ),
             5
         );
         assert_eq!(ts("const o = { m() {}, get x() { return 1; } };"), 2);
@@ -159,7 +133,10 @@ mod tests {
         assert_eq!(ts("function f(): void; function f(a?: number) {}"), 1);
         assert_eq!(ts("abstract class A { abstract m(): void; n(): void; }"), 0);
         assert_eq!(ts("class A { m(): void; m(a?: number) {} }"), 1);
-        assert_eq!(ts("declare function f(): void; interface I { m(): void; }"), 0);
+        assert_eq!(
+            ts("declare function f(): void; interface I { m(): void; }"),
+            0
+        );
         assert_eq!(ts("declare class A { m(): void; }"), 0);
     }
 
@@ -187,7 +164,10 @@ mod tests {
     #[test]
     fn type_level_syntax_is_not_executable() {
         assert_eq!(ts("type T<A> = A extends string ? 1 : 2;"), 0);
-        assert_eq!(ts("type U = (a: number) => void; interface I { f: () => void }"), 0);
+        assert_eq!(
+            ts("type U = (a: number) => void; interface I { f: () => void }"),
+            0
+        );
         assert_eq!(ts("function f(a = b ? 1 : 2) {}"), 2);
     }
 
@@ -201,7 +181,10 @@ mod tests {
 
     #[test]
     fn nested_executable_expressions_are_counted() {
-        assert_eq!(ts("function f(a) { return a ? (b ? 1 : 2) : g(c || d); }"), 4);
+        assert_eq!(
+            ts("function f(a) { return a ? (b ? 1 : 2) : g(c || d); }"),
+            4
+        );
     }
 
     #[test]
@@ -229,20 +212,35 @@ mod tests {
     #[test]
     fn recovered_tree_with_diagnostics_is_an_error() {
         // Парсер відновлюється після цієї помилки й будує дерево.
-        assert_eq!(score(b"a.ts", b"let x = 1; let x = 2; if (a) {} const;"), Err(ScoreError::Syntax));
-        assert_eq!(score(b"a.ts", b"class A { constructor() {} constructor() {} } function f( {"), Err(ScoreError::Syntax));
+        assert_eq!(
+            score(b"a.ts", b"let x = 1; let x = 2; if (a) {} const;"),
+            Err(ScoreError::Syntax)
+        );
+        assert_eq!(
+            score(
+                b"a.ts",
+                b"class A { constructor() {} constructor() {} } function f( {"
+            ),
+            Err(ScoreError::Syntax)
+        );
     }
 
     #[test]
     fn corpus_matches_expected_tsv() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ts-cyclomatic");
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ts-cyclomatic");
         let table = std::fs::read_to_string(dir.join("expected.tsv")).unwrap();
         let mut rows = 0;
         for line in table.lines().skip(1) {
             let cols: Vec<&str> = line.split('\t').collect();
             let content = std::fs::read(dir.join(cols[0])).unwrap();
             let expected: u64 = cols[2].parse().unwrap();
-            assert_eq!(score(cols[0].as_bytes(), &content), Ok(expected), "{}", cols[0]);
+            assert_eq!(
+                score(cols[0].as_bytes(), &content),
+                Ok(expected),
+                "{}",
+                cols[0]
+            );
             rows += 1;
         }
         assert_eq!(rows, 2);

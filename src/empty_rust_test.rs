@@ -142,7 +142,10 @@ fn lex(src: &str) -> Result<Vec<Token>, String> {
                 i += 1;
             }
             if let Some(kind) = doc {
-                out.push(Token { kind, line: start_line });
+                out.push(Token {
+                    kind,
+                    line: start_line,
+                });
             }
         } else if ch == '/' && c.get(i + 1) == Some(&'*') {
             let doc = match (c.get(i + 2), c.get(i + 3)) {
@@ -173,7 +176,10 @@ fn lex(src: &str) -> Result<Vec<Token>, String> {
                 }
             }
             if let Some(kind) = doc {
-                out.push(Token { kind, line: start_line });
+                out.push(Token {
+                    kind,
+                    line: start_line,
+                });
             }
         } else if is_ident_start(ch) {
             let mut j = i;
@@ -195,48 +201,74 @@ fn lex(src: &str) -> Result<Vec<Token>, String> {
                     }
                 }
                 if c.get(k) == Some(&'"') {
-                    i = skip_string(&c, k, raw.then_some(hashes), &mut line).ok_or_else(|| err(start_line))?;
-                    out.push(Token { kind: Kind::Literal, line: start_line });
+                    i = skip_string(&c, k, raw.then_some(hashes), &mut line)
+                        .ok_or_else(|| err(start_line))?;
+                    out.push(Token {
+                        kind: Kind::Literal,
+                        line: start_line,
+                    });
                     continue;
                 }
             }
-            if word == "r" && next == Some('#') && c.get(j + 1).is_some_and(|&x| is_ident_start(x)) {
+            if word == "r" && next == Some('#') && c.get(j + 1).is_some_and(|&x| is_ident_start(x))
+            {
                 let mut k = j + 1;
                 while k < n && is_ident_continue(c[k]) {
                     k += 1;
                 }
                 let raw_name: String = c[j + 1..k].iter().collect();
-                out.push(Token { kind: Kind::Ident(format!("r#{raw_name}")), line: start_line });
+                out.push(Token {
+                    kind: Kind::Ident(format!("r#{raw_name}")),
+                    line: start_line,
+                });
                 i = k;
                 continue;
             }
             if word == "b" && next == Some('\'') {
                 i = skip_char(&c, j).ok_or_else(|| err(start_line))?;
-                out.push(Token { kind: Kind::Literal, line: start_line });
+                out.push(Token {
+                    kind: Kind::Literal,
+                    line: start_line,
+                });
                 continue;
             }
-            out.push(Token { kind: Kind::Ident(word), line: start_line });
+            out.push(Token {
+                kind: Kind::Ident(word),
+                line: start_line,
+            });
             i = j;
         } else if ch.is_ascii_digit() {
             while i < n && (is_ident_continue(c[i])) {
                 i += 1;
             }
-            out.push(Token { kind: Kind::Literal, line: start_line });
+            out.push(Token {
+                kind: Kind::Literal,
+                line: start_line,
+            });
         } else if ch == '"' {
             i = skip_string(&c, i, None, &mut line).ok_or_else(|| err(start_line))?;
-            out.push(Token { kind: Kind::Literal, line: start_line });
+            out.push(Token {
+                kind: Kind::Literal,
+                line: start_line,
+            });
         } else if ch == '\'' {
             let is_char = c.get(i + 1) == Some(&'\\') || c.get(i + 2) == Some(&'\'');
             if is_char {
                 i = skip_char(&c, i).ok_or_else(|| err(start_line))?;
-                out.push(Token { kind: Kind::Literal, line: start_line });
+                out.push(Token {
+                    kind: Kind::Literal,
+                    line: start_line,
+                });
             } else {
                 // Лайфтайм: апостроф і ідентифікатор.
                 i += 1;
                 while i < n && is_ident_continue(c[i]) {
                     i += 1;
                 }
-                out.push(Token { kind: Kind::Punct('\''), line: start_line });
+                out.push(Token {
+                    kind: Kind::Punct('\''),
+                    line: start_line,
+                });
             }
         } else {
             let kind = match ch {
@@ -244,7 +276,10 @@ fn lex(src: &str) -> Result<Vec<Token>, String> {
                 ')' | ']' | '}' => Kind::Close,
                 _ => Kind::Punct(ch),
             };
-            out.push(Token { kind, line: start_line });
+            out.push(Token {
+                kind,
+                line: start_line,
+            });
             i += 1;
         }
     }
@@ -252,7 +287,12 @@ fn lex(src: &str) -> Result<Vec<Token>, String> {
 }
 
 /// `at` вказує на відкривальну лапку; повертає позицію після рядка.
-fn skip_string(c: &[char], at: usize, raw_hashes: Option<usize>, line: &mut usize) -> Option<usize> {
+fn skip_string(
+    c: &[char],
+    at: usize,
+    raw_hashes: Option<usize>,
+    line: &mut usize,
+) -> Option<usize> {
     let mut i = at + 1;
     loop {
         let ch = *c.get(i)?;
@@ -304,7 +344,11 @@ fn match_groups(tokens: &[Token]) -> Result<Vec<usize>, String> {
             _ => {}
         }
     }
-    if stack.is_empty() { Ok(close_of) } else { Err("незбалансовані дужки".into()) }
+    if stack.is_empty() {
+        Ok(close_of)
+    } else {
+        Err("незбалансовані дужки".into())
+    }
 }
 
 fn is_ident(t: &Token, name: &str) -> bool {
@@ -328,7 +372,13 @@ fn skip_item(tokens: &[Token], close_of: &[usize], mut i: usize, end: usize) -> 
     end
 }
 
-fn walk_items(tokens: &[Token], close_of: &[usize], mut i: usize, end: usize, found: &mut Vec<usize>) {
+fn walk_items(
+    tokens: &[Token],
+    close_of: &[usize],
+    mut i: usize,
+    end: usize,
+    found: &mut Vec<usize>,
+) {
     while i < end {
         let item_start = i;
         // Зовнішні атрибути; внутрішні (`#![..]`, `//!`) не рахуються.
@@ -342,7 +392,9 @@ fn walk_items(tokens: &[Token], close_of: &[usize], mut i: usize, end: usize, fo
                     i += 1;
                 }
                 Some(Kind::Punct('#')) if i < end => {
-                    let inner = tokens.get(i + 1).is_some_and(|t| t.kind == Kind::Punct('!'));
+                    let inner = tokens
+                        .get(i + 1)
+                        .is_some_and(|t| t.kind == Kind::Punct('!'));
                     let br = i + 1 + usize::from(inner);
                     if tokens.get(br).is_some_and(|t| is_open(t, '[')) {
                         if !inner {
@@ -433,7 +485,8 @@ fn walk_items(tokens: &[Token], close_of: &[usize], mut i: usize, end: usize, fo
                 found.push(tokens[fn_idx].line);
             }
             i = close + 1;
-        } else if is_ident(&tokens[i], "mod") && tokens.get(i + 2).is_some_and(|t| is_open(t, '{')) {
+        } else if is_ident(&tokens[i], "mod") && tokens.get(i + 2).is_some_and(|t| is_open(t, '{'))
+        {
             let open = i + 2;
             walk_items(tokens, close_of, open + 1, close_of[open], found);
             i = close_of[open] + 1;

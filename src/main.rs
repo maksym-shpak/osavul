@@ -1,13 +1,17 @@
-mod empty_rust_test;
 mod complexity_report;
+mod empty_rust_test;
 mod git_tree;
 mod local_tree;
+mod ts_cognitive;
 mod ts_cyclomatic;
+mod ts_source;
 
 use std::env;
 use std::ffi::OsString;
 use std::io::Write;
 use std::process::ExitCode;
+
+use complexity_report::Metric;
 
 const HELP: &str = "\
 osavul — статичний аналізатор коду
@@ -17,13 +21,17 @@ osavul — статичний аналізатор коду
   osavul --version    показати назву й версію
   osavul check <файл.rs>
                       знайти порожні Rust-тести (правило empty-rust-test)
-  osavul complexity <ревізія>
-                      цикломатична складність файлів .ts коміту (JSON у stdout);
+  osavul complexity <ревізія> [--metric <cyclomatic|cognitive>]
+                      складність файлів .ts коміту (JSON у stdout);
                       вміст береться з коміту, потрібен локальний Git і запуск
                       усередині репозиторію
-  osavul complexity --path <файл-або-тека>
+  osavul complexity --path <файл-або-тека> [--metric <cyclomatic|cognitive>]
                       те саме для поточного вмісту файла .ts або теки на диску
                       (зокрема незакомічених змін); Git не потрібен
+
+Опція --metric (лише в кінці виклику) обирає методику: cyclomatic (типово,
+ts-cyclomatic) або cognitive (ts-cognitive); у записах файлів поле називається
+так само, як метрика.
 
 Коди завершення complexity: 0 — повний звіт, 1 — неповний звіт (JSON усе одно
 у stdout), 2 — помилка аргументів, Git, коміту, шляху чи обходу (stdout порожній).
@@ -46,15 +54,40 @@ fn main() -> ExitCode {
             Some(path) => check(path),
             None => usage_error(),
         },
-        [c, flag, path] if c == "complexity" && flag == "--path" => {
-            emit(complexity_report::measure_local(std::path::Path::new(path)))
+        [c, flag, path] if c == "complexity" && flag == "--path" => emit(
+            complexity_report::measure_local(std::path::Path::new(path), Metric::Cyclomatic),
+        ),
+        [c, flag, path, opt, value] if c == "complexity" && flag == "--path" => {
+            match parse_metric(opt, value) {
+                Some(metric) => emit(complexity_report::measure_local(
+                    std::path::Path::new(path),
+                    metric,
+                )),
+                None => usage_error(),
+            }
         }
         // Один операнд — завжди ревізія, навіть якщо він схожий на прапорець.
         [c, rev] if c == "complexity" => match rev.to_str() {
-            Some(rev) => emit(complexity_report::measure(rev)),
+            Some(rev) => emit(complexity_report::measure(rev, Metric::Cyclomatic)),
             None => usage_error(),
         },
+        [c, rev, opt, value] if c == "complexity" => match (rev.to_str(), parse_metric(opt, value))
+        {
+            (Some(rev), Some(metric)) => emit(complexity_report::measure(rev, metric)),
+            _ => usage_error(),
+        },
         _ => usage_error(),
+    }
+}
+
+fn parse_metric(opt: &OsString, value: &OsString) -> Option<Metric> {
+    if opt != "--metric" {
+        return None;
+    }
+    match value.to_str()? {
+        "cyclomatic" => Some(Metric::Cyclomatic),
+        "cognitive" => Some(Metric::Cognitive),
+        _ => None,
     }
 }
 
@@ -78,7 +111,9 @@ fn emit(result: Result<complexity_report::Report, String>) -> ExitCode {
 fn check(path: &str) -> ExitCode {
     let result = std::fs::read_to_string(path)
         .map_err(|e| format!("не вдалося прочитати {path}: {e}"))
-        .and_then(|text| empty_rust_test::find_empty_tests(&text).map_err(|e| format!("{path}: {e}")));
+        .and_then(|text| {
+            empty_rust_test::find_empty_tests(&text).map_err(|e| format!("{path}: {e}"))
+        });
     match result {
         Ok(lines) => {
             let mut report = String::new();

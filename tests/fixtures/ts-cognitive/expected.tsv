@@ -1,0 +1,5 @@
+path	pair	cognitive
+flat.ts	nesting	2
+nested.ts	nesting	3
+uniform.ts	operators	1
+mixed.ts	operators	2
