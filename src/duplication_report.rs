@@ -4,9 +4,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::complexity_report::{
-    FileInput, Origin, Report, git_inputs, local_inputs, path_fields,
-};
+use crate::complexity_report::{FileInput, Origin, Report, git_inputs, local_inputs, path_fields};
 use crate::ts_duplication::{self, Group, Prepared};
 
 #[derive(Serialize)]
@@ -117,9 +115,7 @@ pub fn build(origin: Origin<'_>, files: Vec<FileInput>) -> Report {
     let prepared: Vec<Result<Prepared, &'static str>> = files
         .iter()
         .map(|file| match &file.content {
-            Ok(content) => {
-                ts_duplication::prepare(&file.path, content).map_err(|e| e.reason())
-            }
+            Ok(content) => ts_duplication::prepare(&file.path, content).map_err(|e| e.reason()),
             Err(e) => Err(e.reason()),
         })
         .collect();

@@ -172,7 +172,11 @@ fn find_groups_with<S: std::hash::BuildHasher>(files: &[&Prepared], hasher: S) -
 
     let left_differs = |starts: &[usize]| -> bool {
         let left = |p: usize| -> Option<u32> {
-            if origin[p].1 == 0 { None } else { Some(seq[p - 1]) }
+            if origin[p].1 == 0 {
+                None
+            } else {
+                Some(seq[p - 1])
+            }
         };
         let first = left(starts[0]);
         first.is_none() || starts.iter().any(|&p| left(p) != first)
@@ -193,7 +197,11 @@ fn find_groups_with<S: std::hash::BuildHasher>(files: &[&Prepared], hasher: S) -
                 && weight[sa[b] + l] - weight[sa[b]] >= MIN_TOKENS
                 && left_differs(&sa[b..i])
             {
-                candidates.push(Candidate { len: l, lb: b, rb: i });
+                candidates.push(Candidate {
+                    len: l,
+                    lb: b,
+                    rb: i,
+                });
             }
         }
         if stack.last().is_none_or(|t| t.0 < cur) {
@@ -851,10 +859,7 @@ mod tests {
                 block("a", 9),
                 block("b", 9),
             );
-            let files = [
-                make(&[&p, &s, &fa, &s, &q]),
-                make(&[&p, &s, &fb, &s, &q]),
-            ];
+            let files = [make(&[&p, &s, &fa, &s, &q]), make(&[&p, &s, &fb, &s, &q])];
             assert_eq!(run(&files).len(), 3);
         }
 

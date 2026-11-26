@@ -364,7 +364,8 @@ mod tests {
 
     #[test]
     fn ignored_records_and_bad_totals_do_not_matter() {
-        let text = "TN:x\nSF:a\nFN:1,f\nFNDA:1,f\nLF:100\nLH:100\nBRF:9\nBRH:9\nDA:1,0\nend_of_record\n";
+        let text =
+            "TN:x\nSF:a\nFN:1,f\nFNDA:1,f\nLF:100\nLH:100\nBRF:9\nBRH:9\nDA:1,0\nend_of_record\n";
         assert_eq!(merged(&[text], 3), Ok(counts(1, 1, 0, 0)));
     }
 
@@ -374,8 +375,18 @@ mod tests {
             let at = |n: &str| format!("SF:a\n{}\nend_of_record\n", rec.replace("{}", n));
             assert!(merged(&[&at("1")], 3).is_ok());
             assert!(merged(&[&at("3")], 3).is_ok());
-            for n in ["0", "-1", "4", "99999999999999999999999", "-99999999999999999999999"] {
-                assert_eq!(merged(&[&at(n)], 3), Err(Defect::LineOutOfRange), "{rec} {n}");
+            for n in [
+                "0",
+                "-1",
+                "4",
+                "99999999999999999999999",
+                "-99999999999999999999999",
+            ] {
+                assert_eq!(
+                    merged(&[&at(n)], 3),
+                    Err(Defect::LineOutOfRange),
+                    "{rec} {n}"
+                );
             }
         }
     }
@@ -413,8 +424,14 @@ mod tests {
         sorted.sort_by(|a, b| cmp_block_id(a, b));
         assert_eq!(sorted, [b"0" as &[u8], b"9", b"010", b"10", b"A", b"x"]);
         // Надвеликі числа порівнюються за значенням, а не переповнюються.
-        let (big, bigger) = (format!("1{}", "0".repeat(30)), format!("1{}", "0".repeat(31)));
-        assert_eq!(cmp_block_id(big.as_bytes(), bigger.as_bytes()), Ordering::Less);
+        let (big, bigger) = (
+            format!("1{}", "0".repeat(30)),
+            format!("1{}", "0".repeat(31)),
+        );
+        assert_eq!(
+            cmp_block_id(big.as_bytes(), bigger.as_bytes()),
+            Ordering::Less
+        );
     }
 
     #[test]
@@ -467,7 +484,10 @@ mod tests {
 
     #[test]
     fn empty_block_is_all_zero() {
-        assert_eq!(merged(&["SF:a\nend_of_record\n"], 1), Ok(counts(0, 0, 0, 0)));
+        assert_eq!(
+            merged(&["SF:a\nend_of_record\n"], 1),
+            Ok(counts(0, 0, 0, 0))
+        );
     }
 
     fn fragment(file: &str, name: &str) -> String {
@@ -511,7 +531,12 @@ mod tests {
             match (f[5], result) {
                 ("-", Ok(c)) => {
                     let want: Vec<u64> = f[6..].iter().map(|n| n.parse().unwrap()).collect();
-                    let got = [c.lines, c.uncovered_lines, c.conditions, c.uncovered_conditions];
+                    let got = [
+                        c.lines,
+                        c.uncovered_lines,
+                        c.conditions,
+                        c.uncovered_conditions,
+                    ];
                     assert_eq!(got.as_slice(), want.as_slice(), "{}", f[0]);
                 }
                 ("lcov-invalid-record", Err(Defect::InvalidRecord)) => {}
