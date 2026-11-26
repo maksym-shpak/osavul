@@ -3,6 +3,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
 
+/// Вміст об'єкта не вдалося отримати: його немає, він не `blob` або вивід Git обірвано.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ReadError;
 
@@ -17,11 +18,13 @@ impl ReadError {
 pub struct Entry {
     /// Вихідні байти шляху від кореня Git-дерева.
     pub path: Vec<u8>,
+    /// Ідентифікатор `blob`, за яким читається вміст.
     pub oid: String,
 }
 
 #[derive(Debug)]
 pub struct Inventory {
+    /// Повний SHA коміту, до якого розв'язано ревізію.
     pub sha: String,
     /// Упорядковано за байтами шляху.
     pub entries: Vec<Entry>,
@@ -37,6 +40,8 @@ fn git() -> Command {
     cmd
 }
 
+/// Виконує команду Git без `stdin` і повертає `stdout`; при невдачі помилка містить `stderr` із
+/// префіксом `what`.
 fn run(mut cmd: Command, what: &str) -> Result<Vec<u8>, String> {
     let out = cmd
         .stdin(Stdio::null())
@@ -50,8 +55,8 @@ fn run(mut cmd: Command, what: &str) -> Result<Vec<u8>, String> {
     }
 }
 
-/// Абсолютна база зіставлення зовнішніх звітів: верхня тека робочого дерева, а для bare — тека самого репозиторію.
-/// Байти імені зберігаються, знімається лише службовий LF.
+/// Абсолютна база зіставлення зовнішніх звітів: верхня тека робочого дерева, а для bare — тека
+/// самого репозиторію. Байти імені зберігаються, знімається лише службовий LF.
 pub fn match_root() -> Result<Vec<u8>, String> {
     let mut cmd = git();
     cmd.args(["rev-parse", "--is-bare-repository"]);
@@ -86,7 +91,8 @@ pub fn inventory(rev: &str) -> Result<Inventory, String> {
 
 /// Розв'язує ревізію як окремий аргумент Git без переписування виразу. Неоднозначні імена
 /// відхиляються: Git лише попереджає про них і обирає одну з цілей, а `-c` перекриває
-/// користувацьке вимкнення попередження.
+/// користувацьке вимкнення попередження. Неоднозначність розпізнається за словом `ambiguous` у
+/// `stderr` Git.
 fn resolve_commit(rev: &str) -> Result<String, String> {
     let fail = |msg: &str| format!("не вдалося розв'язати коміт {rev}: {msg}");
     let out = git()
@@ -124,6 +130,8 @@ fn resolve_commit(rev: &str) -> Result<String, String> {
     Ok(sha)
 }
 
+/// Розбирає вивід `ls-tree -z`, лишаючи лише `blob` із режимами `100644` і `100755` та суфіксом
+/// `.ts`; результат відсортований за байтами шляху.
 fn parse_listing(listing: &[u8]) -> Result<Vec<Entry>, String> {
     let mut entries = Vec::new();
     for record in listing.split(|b| *b == 0).filter(|r| !r.is_empty()) {

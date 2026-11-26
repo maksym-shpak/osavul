@@ -1,19 +1,6 @@
-//! Методика `ts-cognitive` версії 1: синтаксичний підрахунок когнітивної складності
-//! одного файла TypeScript. Зміна правил підрахунку потребує нової версії.
-//!
-//! Граничні випадки (код поза функціями, рівень `0`), якими зафіксовано правила:
-//!
-//! - `if`, `else if`, `else`, а в тілі `else if` ще один `if`: `1 + 1 + 1 + 2 = 5`.
-//!   `else if` — фіксований `+1`, а його тіло лишається на рівні початкового `if` плюс один.
-//! - Тернарник у гілці тернарника (також в альтернативній): `1 + 2 = 3`.
-//! - У тілі `if` є `switch`, у його `case` є `if`: `1 + 1 + 3 = 5`; `switch` дає `+1`
-//!   один раз, порожні `case` нічого не додають.
-//! - `if` з умовою `a && b || c`: `1 + 2 = 3` (умова обходиться на рівні самого `if`).
-//! - Зовнішній `if`, у тілі `try` з одним `if` і порожній `catch`: `1 + 2 + 2 = 5`;
-//!   `try` рівня не підвищує, `catch` рахується з вкладеністю, а `if` у його тілі додав би `3`.
-//! - Логічні послідовності: `a && b && c` = 1, `a && b || c` = 2,
-//!   `a && b && c || d || e` = 2, `a && (b || c) && d` = 3.
-//! - `async`, `await` і генератори власного приросту не дають.
+//! Методика `ts-cognitive` версії 1: синтаксичний підрахунок когнітивної складності одного файла
+//! TypeScript (структури керування з урахуванням вкладеності, логічні послідовності, пряма
+//! рекурсія). Зміна правил підрахунку потребує нової версії.
 
 use crate::ts_source::{ScoreError, with_program};
 use oxc_ast::ast::{
@@ -42,8 +29,10 @@ pub fn score(path: &[u8], content: &[u8]) -> Result<u64, ScoreError> {
     })
 }
 
+/// Стан обходу: накопичений бал і контекст вкладеності.
 struct Counter {
     total: u64,
+    /// Поточний рівень вкладеності: `structural` додає його до базового `+1`.
     nesting: u64,
     in_function: bool,
     /// Власне ім'я найближчої функції для прямої рекурсії; стрілка його не має.
@@ -55,9 +44,11 @@ struct Counter {
 }
 
 impl Counter {
-    // Вкладена функція піднімає рівень лише всередині іншої функції чи конструкції, що
-    // вкладає; прямий ініціалізатор чи колбек на рівні модуля, а також метод класу
-    // (`top`), починають з нуля.
+    /// Виконує `f` в контексті нової функції.
+    ///
+    /// Вкладена функція піднімає рівень лише всередині іншої функції чи конструкції, що
+    /// вкладає; прямий ініціалізатор чи колбек на рівні модуля, а також метод класу (`top`),
+    /// починають з нуля. Після `f` попередній контекст відновлюється.
     fn function<F: FnOnce(&mut Self)>(&mut self, top: bool, f: F) {
         let saved = (
             self.nesting,
@@ -78,8 +69,8 @@ impl Counter {
         (self.nesting, self.in_function, self.name, self.class_method) = saved;
     }
 
-    // Ініціалізатор поля й статичний блок — код поза функцією з нульовим рівнем,
-    // навіть у класі, оголошеному всередині функції.
+    /// Виконує `f` для ініціалізатора поля чи статичного блока: це код поза функцією з нульовим
+    /// рівнем, навіть у класі, оголошеному всередині функції.
     fn member_code<F: FnOnce(&mut Self)>(&mut self, f: F) {
         let saved = (
             self.nesting,
@@ -94,8 +85,10 @@ impl Counter {
         (self.nesting, self.in_function, self.name, self.class_method) = saved;
     }
 
-    // Параметри обходяться без імені функції: самовиклик в ініціалізаторі параметра
-    // не є самовикликом у тілі. Типи, повернення й `this`-параметр пропускаються.
+    /// Обходить параметри й тіло функції; ім'я для розпізнавання рекурсії діє лише в тілі.
+    ///
+    /// Самовиклик в ініціалізаторі параметра не є самовикликом у тілі. Типи, тип повернення й
+    /// `this`-параметр пропускаються.
     fn function_parts<'a>(&mut self, it: &Function<'a>, name: Option<String>, class_method: bool) {
         self.visit_formal_parameters(&it.params);
         self.name = name;
@@ -105,6 +98,7 @@ impl Counter {
         }
     }
 
+    /// Додає `1 + рівень вкладеності`.
     fn structural(&mut self) {
         self.total += 1 + self.nesting;
     }
@@ -115,8 +109,12 @@ impl Counter {
         self.nesting -= 1;
     }
 
-    // Гілки одного ланцюжка обробляються тут, а не через `visit_if_statement`, щоб
-    // `else if` мав фіксований приріст і той самий рівень тіла, що й початковий `if`.
+    /// Рахує ланцюжок `if`/`else if`/`else`: початковий `if` дає `1 + рівень`, а кожен `else if`
+    /// та `else` — фіксований `+1`. Тіло `else if` лишається на рівні тіла початкового `if`, тож
+    /// вкладений у нього `if` дає `1 + рівень + 1`.
+    ///
+    /// Гілки обробляються тут, а не через `visit_if_statement`, бо інакше `else if` рахувався б
+    /// як вкладений `if`.
     fn if_chain<'a>(&mut self, it: &IfStatement<'a>, is_else_if: bool) {
         if is_else_if {
             self.total += 1;
@@ -135,6 +133,7 @@ impl Counter {
         }
     }
 
+    /// Дужки прозорі для логічної послідовності.
     fn operand<'a>(&mut self, e: &Expression<'a>, last: &mut Option<LogicalOperator>) {
         match e.without_parentheses() {
             Expression::LogicalExpression(l) => self.chain(l, last),
@@ -142,6 +141,8 @@ impl Counter {
         }
     }
 
+    /// Додає `+1` на початку логічної послідовності й за кожної зміни оператора в ній.
+    /// `last` — оператор, яким послідовність закінчилась на цей момент.
     fn chain<'a>(&mut self, it: &LogicalExpression<'a>, last: &mut Option<LogicalOperator>) {
         self.operand(&it.left, last);
         if *last != Some(it.operator) {
@@ -153,10 +154,12 @@ impl Counter {
 }
 
 impl<'a> Visit<'a> for Counter {
+    /// Весь ланцюжок `if` рахується в `Counter::if_chain`.
     fn visit_if_statement(&mut self, it: &IfStatement<'a>) {
         self.if_chain(it, false);
     }
 
+    /// Тернарник дає `1 + рівень`; умова лишається на рівні входу, обидві гілки — на рівень глибше.
     fn visit_conditional_expression(&mut self, it: &ConditionalExpression<'a>) {
         self.structural();
         self.visit_expression(&it.test);
@@ -166,6 +169,7 @@ impl<'a> Visit<'a> for Counter {
         });
     }
 
+    /// Заголовок циклу обходиться на рівні входу, тіло — на рівень глибше.
     fn visit_for_statement(&mut self, it: &ForStatement<'a>) {
         self.structural();
         if let Some(init) = &it.init {
@@ -207,6 +211,8 @@ impl<'a> Visit<'a> for Counter {
         self.visit_expression(&it.test);
     }
 
+    /// `catch` дає `1 + рівень` і вкладає своє тіло; `try` і `finally` рівня не змінюють й нічого
+    /// не дають.
     fn visit_catch_clause(&mut self, it: &CatchClause<'a>) {
         self.structural();
         if let Some(param) = &it.param {
@@ -215,6 +221,8 @@ impl<'a> Visit<'a> for Counter {
         self.nested(|c| c.visit_block_statement(&it.body));
     }
 
+    /// `switch` дає фіксований `+1` один раз, а не за кожен `case`; усі `case` лежать на рівень
+    /// глибше.
     fn visit_switch_statement(&mut self, it: &SwitchStatement<'a>) {
         self.total += 1;
         self.visit_expression(&it.discriminant);
@@ -225,6 +233,7 @@ impl<'a> Visit<'a> for Counter {
         });
     }
 
+    /// Лише `break` з міткою дає `+1`.
     fn visit_break_statement(&mut self, it: &BreakStatement<'a>) {
         if it.label.is_some() {
             self.total += 1;
@@ -232,6 +241,7 @@ impl<'a> Visit<'a> for Counter {
         walk::walk_break_statement(self, it);
     }
 
+    /// Лише `continue` з міткою дає `+1`.
     fn visit_continue_statement(&mut self, it: &ContinueStatement<'a>) {
         if it.label.is_some() {
             self.total += 1;
@@ -240,9 +250,12 @@ impl<'a> Visit<'a> for Counter {
     }
 
     fn visit_logical_expression(&mut self, it: &LogicalExpression<'a>) {
+        // Нова послідовність: вираз, до якого ми дійшли не через `chain` (виклик, заперечення,
+        // тернарник, `as`), не продовжує зовнішню.
         self.chain(it, &mut None);
     }
 
+    /// Функція не дає приросту, а лише змінює контекст вкладеності.
     fn visit_function(&mut self, it: &Function<'a>, flags: oxc_syntax::scope::ScopeFlags) {
         let _ = flags;
         let name = self
@@ -280,6 +293,8 @@ impl<'a> Visit<'a> for Counter {
             self.visit_decorator(decorator);
         }
         self.visit_property_key(&it.key);
+        // Лише звичайний метод із простим ім'ям може бути самовикликом; конструктор, `get` і
+        // `set` імені для рекурсії не мають.
         let name = match (&it.key, it.kind) {
             (PropertyKey::StaticIdentifier(id), MethodDefinitionKind::Method) => {
                 Some(id.name.to_string())
@@ -314,6 +329,9 @@ impl<'a> Visit<'a> for Counter {
         self.member_code(|c| walk::walk_static_block(c, it));
     }
 
+    /// Пряма рекурсія дає `+1` за кожен виклик: `name()` для найближчої іменованої функції або
+    /// `this.name()` у методі класу. Опосередкована рекурсія й виклик зовнішньої функції з
+    /// вкладеної стрілки не рахуються.
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
         if let Some(name) = &self.name {
             let direct = match it.callee.without_parentheses() {
@@ -352,6 +370,7 @@ mod tests {
         assert_eq!(s("if (a) {} else if (b) {} else {}"), 3);
     }
 
+    // Виявляє хибний внесок вкладеного `if` у тілі `else if` (має бути `1 + рівень + 1`).
     #[test]
     fn else_if_chain_with_inner_if_in_else_if_body() {
         assert_eq!(
@@ -367,6 +386,7 @@ mod tests {
         assert_eq!(s("if (a) {} else { if (b) {} }"), 1 + 1 + 2);
     }
 
+    // Виявляє втрату приросту вкладення для тернарника в гілці або в альтернативі: `1 + 2`.
     #[test]
     fn ternary_in_either_branch_of_ternary_costs_three() {
         assert_eq!(s("a ? b : c;"), 1);
@@ -379,6 +399,7 @@ mod tests {
         assert_eq!(s("(a ? b : c) ? 1 : 2;"), 2);
     }
 
+    // Виявляє підрахунок `switch` за кожен `case` або вкладення без рівня: `1 + 1 + 3`.
     #[test]
     fn switch_counts_once_and_nests_its_body() {
         assert_eq!(s("switch (a) { case 1: case 2: default: }"), 1);
@@ -421,6 +442,7 @@ mod tests {
         assert_eq!(s("for (;;) { continue; }"), 1);
     }
 
+    // Виявляє підвищення рівня через `try` чи пропуск вкладення в `catch`.
     #[test]
     fn catch_nests_but_try_and_finally_do_not() {
         assert_eq!(s("try { if (a) {} } finally { if (b) {} }"), 2);
@@ -438,6 +460,7 @@ mod tests {
         assert_eq!(s("for (;;) { while (a) {} } while (b) {}"), 3 + 1);
     }
 
+    // Виявляє хибний підрахунок початку послідовності чи зміни оператора.
     #[test]
     fn logical_sequences_count_starts_and_kind_changes() {
         assert_eq!(s("a && b && c;"), 1);
@@ -454,6 +477,7 @@ mod tests {
         assert_eq!(s("(a && b) && c;"), 1);
     }
 
+    // Умова `if` обходиться на рівні самого `if`: `1 + 2`.
     #[test]
     fn if_condition_adds_logical_sequences_to_if() {
         assert_eq!(s("if (a && b || c) {}"), 3);
@@ -498,6 +522,7 @@ mod tests {
         assert_eq!(s("function o(a: number): void; function o(a: any) {}"), 0);
     }
 
+    // `async`, `await` і генератори власного приросту не дають.
     #[test]
     fn async_await_and_generators_do_not_change_score() {
         let body = "if (a) { if (b) {} }";
@@ -629,6 +654,7 @@ mod tests {
         assert_eq!(s(&format!("const f = async () => {{ {body} }};")), plain);
     }
 
+    // Виявляє розбіжність підрахунку з очікуваним балом еталонної функції.
     #[test]
     fn whitepaper_sum_of_primes_is_seven() {
         let src = "function sumOfPrimes(max: number): number {
@@ -646,6 +672,7 @@ mod tests {
         assert_eq!(s(src), 1 + 2 + 3 + 1);
     }
 
+    // Виявляє розбіжність підрахунку з очікуваним балом еталонної функції.
     #[test]
     fn whitepaper_get_words_is_one() {
         let src = "function getWords(number: number): string {
@@ -659,6 +686,7 @@ mod tests {
         assert_eq!(s(src), 1);
     }
 
+    // Виявляє розбіжність підрахунку з очікуваним балом еталонної функції.
     #[test]
     fn whitepaper_overridden_symbol_from_is_nineteen() {
         let src =

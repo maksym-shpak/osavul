@@ -1,5 +1,6 @@
 //! Методика `ts-duplication` версії 1: підготовка рядків токенів файла TypeScript для
-//! пошуку точних повторів. Зміна правил нормалізації чи вилучень потребує нової версії.
+//! пошуку точних повторів і сам пошук груп однакових послідовностей рядків. Зміна правил
+//! нормалізації чи вилучень потребує нової версії.
 
 use crate::ts_source::{ScoreError, line_of, line_starts, with_parsed};
 use oxc_ast::ast::{
@@ -31,6 +32,10 @@ pub struct Prepared {
 }
 
 /// Готує файл до пошуку; шлях лише обирає режим `.d.ts`.
+///
+/// Токени з початком на одному фізичному рядку утворюють один `Row`; коментарі й пробіли
+/// токенів не дають. Статичні імпорти та `require`-оголошення вилучаються разом із
+/// токенами, не лишаючи порожніх рядків. Помилка розбору не дає часткового результату.
 pub fn prepare(path: &[u8], content: &[u8]) -> Result<Prepared, ScoreError> {
     with_parsed(path, content, |text, program, tokens| {
         let mut finder = Removals::default();
@@ -46,6 +51,8 @@ pub fn prepare(path: &[u8], content: &[u8]) -> Result<Prepared, ScoreError> {
             let first = line_of(&starts, start);
             let last = line_of(&starts, end - 1);
             let raw = &text[start..end];
+            // Середина й хвіст шаблону починаються з `}`, тож лишаються дослівними; нормалізується
+            // лише токен із початковою лапкою.
             let normalized = if raw.starts_with(['"', '\'', '`']) {
                 LITERAL
             } else {
@@ -117,6 +124,11 @@ struct Candidate {
 }
 
 /// Шукає групи клонів між усіма файлами й усередині кожного.
+///
+/// Група — максимальна послідовність щонайменше з `MIN_ROWS` рядків і `MIN_TOKENS` токенів
+/// (обидва пороги включні), що точно збігається принаймні у двох місцях. Групу, усі входження
+/// якої лежать у входженнях однієї довшої групи з тим самим набором файлів, відкинуто.
+/// Групи впорядковано за своїми входженнями.
 pub fn find_groups(files: &[&Prepared]) -> Vec<Group> {
     find_groups_with(files, std::collections::hash_map::RandomState::new())
 }
@@ -676,7 +688,8 @@ mod tests {
         use super::super::*;
         use std::hash::{BuildHasher, Hasher};
 
-        /// Файл із рядків `(ідентифікатор, кількість токенів)`; рядок i лежить на фізичному рядку i.
+        /// Файл із рядків `(ідентифікатор, кількість токенів)`; рядок i лежить на фізичному
+        /// рядку i.
         fn file(rows: &[(&str, usize)]) -> Prepared {
             Prepared {
                 lines: rows.len() as u64 + 1,
@@ -722,6 +735,7 @@ mod tests {
             find_groups(&refs)
         }
 
+        // Виявляє зсув порогів: дубль на межі в 10 рядків і 100 токенів має знаходитись.
         #[test]
         fn thresholds_are_inclusive_on_rows_and_tokens() {
             let s10 = block("s", 10);
@@ -753,6 +767,7 @@ mod tests {
             }
         }
 
+        // Виявляє об'єднання різних рядків із однаковим хешем у хибну групу.
         #[test]
         fn forced_hash_collision_keeps_exact_equality() {
             let a = block("s", 10);
@@ -783,7 +798,7 @@ mod tests {
             // Три входження з різними контекстами лишаються в одній групі.
             let groups = run(&[make(&[&p, &f, &p, &g, &p])]);
             assert_eq!(occs(&groups), [[(0, 0, 9), (0, 11, 20), (0, 22, 31)]]);
-            // Перекривні старти: триразовий вплив поглинається довшою групою з двох входжень.
+            // Три входження поспіль із перекриттям поглинаються довшою групою з двох входжень.
             let groups = run(&[make(&[&p, &p, &p])]);
             assert_eq!(occs(&groups), [[(0, 0, 19), (0, 10, 29)]]);
         }
@@ -804,6 +819,7 @@ mod tests {
             assert_eq!(occs(&groups), [[(0, 0, 1497), (0, 2, 1499)]]);
         }
 
+        // Виявляє хибне відкидання групи, покритої не всіма входженнями або з іншим набором файлів.
         #[test]
         fn contained_group_is_dropped_only_when_all_occurrences_are_covered() {
             let (s, q, f1, f2, f3) = (

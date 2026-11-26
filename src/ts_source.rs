@@ -1,4 +1,5 @@
-//! Спільний розбір TypeScript для всіх методик (дерево або токени): декодування, BOM, режим `.d.ts`, діагностики.
+//! Спільний розбір TypeScript для всіх методик (дерево або токени): декодування, BOM,
+//! режим `.d.ts`, діагностики. Підрахунку модуль не виконує: його робить `walk` викликача.
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::Program;
@@ -6,9 +7,12 @@ use oxc_parser::config::TokensParserConfig;
 use oxc_parser::{ParseOptions, Parser, Token};
 use oxc_span::SourceType;
 
+/// Причина, з якої файл не отримує балу; часткового балу не буває.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ScoreError {
+    /// Вміст не є коректним UTF-8.
     InvalidUtf8,
+    /// Парсер повернув хоча б одну діагностику, навіть якщо відновив дерево.
     Syntax,
 }
 
@@ -22,6 +26,7 @@ impl ScoreError {
     }
 }
 
+/// Декодує вміст як UTF-8, відкидає BOM і за суфіксом `.d.ts` обирає режим файла оголошень.
 fn prepare<'a>(path: &[u8], content: &'a [u8]) -> Result<(&'a str, SourceType), ScoreError> {
     let text = std::str::from_utf8(content).map_err(|_| ScoreError::InvalidUtf8)?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);

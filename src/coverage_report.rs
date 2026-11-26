@@ -1,6 +1,7 @@
 //! Зіставлення шляхів `SF` зі звіту LCOV з повним інвентарем `.ts` і явними тестовими виключеннями.
 //!
-//! Усе зіставлення лексичне: файлів на диску ніхто не відкриває, тож ключі старого коміту працюють без checkout.
+//! Усе зіставлення лексичне: файлів на диску ніхто не відкриває, тож ключі старого коміту працюють
+//! без checkout.
 
 use std::collections::{BTreeSet, HashMap};
 use std::ffi::OsStr;
@@ -34,8 +35,8 @@ fn split(path: &[u8]) -> impl Iterator<Item = &[u8]> {
     path.split(|b| *b == b'/').filter(|c| !c.is_empty())
 }
 
-/// Лексично дописує `rel` до `base`, враховуючи `.` і `..`. Без `keep_up` вихід над корінь файлової системи
-/// ігнорується, з ним — лишається ведучими `..`.
+/// Лексично дописує `rel` до `base`, враховуючи `.` і `..`. Без `keep_up` вихід над корінь файлової
+/// системи ігнорується, з ним — лишається ведучими `..`.
 fn normalize(base: &[Vec<u8>], rel: &[u8], keep_up: bool) -> Comps {
     let mut out: Comps = base.to_vec();
     for part in split(rel) {
@@ -92,7 +93,8 @@ pub fn parse_tests(args: &[&OsStr]) -> Result<Vec<Vec<u8>>, String> {
 }
 
 impl Matcher {
-    /// `root` — абсолютна канонічна тека, `keys` — повний інвентар у його порядку, `tests` — результат `parse_tests`.
+    /// `root` — абсолютна канонічна тека, `keys` — повний інвентар у його порядку, `tests` —
+    /// результат `parse_tests`.
     pub fn new<'a>(
         root: &[u8],
         keys: impl IntoIterator<Item = &'a [u8]>,
@@ -140,6 +142,11 @@ impl Matcher {
             .collect()
     }
 
+    /// Визначає, кому належить блок LCOV із шляхом `sf`, лексично й без доступу до диска.
+    ///
+    /// Збіг ключа інвентарю дає `Main`, або `Ignored`, якщо ключ є тестом. Без збігу блок
+    /// ігнорується, коли `sf` не закінчується на `.ts` або серед кандидатів є тест; інакше це
+    /// `Unresolved`.
     pub fn resolve(&self, report_dir: &[u8], sf: &[u8]) -> Owner {
         let candidates = self.candidates(report_dir, sf);
         if let Some((key, idx)) = candidates
@@ -377,7 +384,8 @@ pub fn build(
     Report { json, complete }
 }
 
-/// Читає запитані LCOV з диска; шлях відраховується від поточної теки процесу, тека звіту канонізується.
+/// Читає запитані LCOV з диска; шлях відраховується від поточної теки процесу, тека звіту
+/// канонізується.
 fn read_reports(paths: &[&OsStr]) -> Result<Vec<LcovInput>, String> {
     let cwd =
         std::env::current_dir().map_err(|e| format!("не вдалося визначити поточну теку: {e}"))?;
@@ -406,7 +414,8 @@ fn canonical_root(root: &std::path::Path) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("не вдалося визначити корінь {}: {e}", root.display()))
 }
 
-/// Звіт для коміту `rev`; `tests` — результат `parse_tests`. `Err` — фатальна відмова до публікації.
+/// Звіт для коміту `rev`; `tests` — результат `parse_tests`. `Err` — фатальна відмова до
+/// публікації.
 pub fn measure(rev: &str, lcov: &[&OsStr], tests: Vec<Vec<u8>>) -> Result<Report, String> {
     let (sha, files) = crate::complexity_report::git_inputs(rev)?;
     let top = crate::git_tree::match_root()?;
@@ -484,6 +493,7 @@ mod tests {
         assert!(parse_tests(&[OsStr::new("a/../../b")]).is_err());
     }
 
+    // Виявляє зіставлення тестової теки за префіксом рядка замість цілого компонента шляху.
     #[test]
     fn tests_match_whole_components_only() {
         let m = matcher("test/a.ts,testing/a.ts,test.ts", "test");
@@ -553,6 +563,7 @@ mod tests {
         serde_json::from_slice(&report.json).unwrap()
     }
 
+    // Виявляє зміну точних байтів JSON: порядку полів, округлення відсотків чи `null` без гілок.
     #[test]
     fn exact_json_bytes_and_percent_formats() {
         let files = vec![
@@ -591,6 +602,7 @@ mod tests {
         assert_eq!(String::from_utf8(report.json).unwrap(), want);
     }
 
+    // Виявляє втрату шляхів не в UTF-8 у `files` і `unresolved` та хибний повний звіт при них.
     #[test]
     fn non_utf8_paths_use_path_bytes_in_files_and_unresolved() {
         let files = vec![file(b"\xff.ts", b"a();")];
@@ -611,6 +623,7 @@ mod tests {
         ));
     }
 
+    // Виявляє недетермінізм: байти звіту не мають залежати від порядку файлів LCOV і блоків у них.
     #[test]
     fn report_and_block_order_do_not_change_bytes() {
         let main = std::fs::read(corpus().join("src/main.ts")).unwrap();

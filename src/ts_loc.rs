@@ -79,6 +79,8 @@ mod tests {
         assert_eq!(loc("let a;\n// x\n/* y */\nlet b;\n"), Ok(2));
     }
 
+    // Виявляє читання маркера коментаря всередині літерала як коментаря: рядки коду зникли б
+    // із балу.
     #[test]
     fn comment_markers_inside_literals_are_code() {
         assert_eq!(loc("let a = \"//\";\nlet b = '/*';\n"), Ok(2));

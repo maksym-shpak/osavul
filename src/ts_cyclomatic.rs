@@ -1,4 +1,5 @@
-//! Методика `ts-cyclomatic` версії 1: синтаксичний підрахунок для одного файла TypeScript.
+//! Методика `ts-cyclomatic` версії 1: синтаксичний підрахунок для одного файла TypeScript
+//! (кожна функція з тілом, гілка й логічний оператор дають `+1`).
 //! Зміна правил підрахунку потребує нової версії.
 
 use crate::ts_source::{ScoreError, with_program};
@@ -18,11 +19,14 @@ pub fn score(path: &[u8], content: &[u8]) -> Result<u64, ScoreError> {
     })
 }
 
+/// Накопичений бал; код поза функціями не має базового значення.
 struct Counter(u64);
 
 impl<'a> Visit<'a> for Counter {
-    // Метод, конструктор і аксесор — це `Function` у `MethodDefinition`, тому рахуються тут
-    // один раз; сигнатури й абстрактні методи не мають тіла.
+    /// Кожна функція з тілом дає `+1`; сигнатури й абстрактні методи без тіла нічого не дають.
+    ///
+    /// Метод, конструктор і аксесор — це `Function` у `MethodDefinition`, тому рахуються тут
+    /// один раз.
     fn visit_function(&mut self, it: &Function<'a>, flags: oxc_syntax::scope::ScopeFlags) {
         if it.body.is_some() {
             self.0 += 1;
@@ -55,7 +59,7 @@ impl<'a> Visit<'a> for Counter {
         walk::walk_for_in_statement(self, it);
     }
 
-    // Покриває і `for await…of`.
+    /// Покриває і `for await…of`.
     fn visit_for_of_statement(&mut self, it: &ForOfStatement<'a>) {
         self.0 += 1;
         walk::walk_for_of_statement(self, it);
@@ -71,13 +75,13 @@ impl<'a> Visit<'a> for Counter {
         walk::walk_do_while_statement(self, it);
     }
 
-    // `case` і `default` — один вузол `SwitchCase`.
+    /// Кожен `case` і `default` дає `+1` (це один вузол `SwitchCase`); сам `switch` нічого не дає.
     fn visit_switch_case(&mut self, it: &SwitchCase<'a>) {
         self.0 += 1;
         walk::walk_switch_case(self, it);
     }
 
-    // `||`, `&&`, `??`: усі три оператори лише в `LogicalExpression`.
+    /// Кожен `||`, `&&`, `??` дає `+1`: усі три оператори є лише в `LogicalExpression`.
     fn visit_logical_expression(&mut self, it: &LogicalExpression<'a>) {
         self.0 += 1;
         walk::walk_logical_expression(self, it);
@@ -171,6 +175,7 @@ mod tests {
         assert_eq!(ts("function f(a = b ? 1 : 2) {}"), 2);
     }
 
+    // Виявляє появу базового значення для коду поза функціями.
     #[test]
     fn code_outside_functions_has_no_base_score() {
         assert_eq!(ts("if (a && b) {}"), 2);

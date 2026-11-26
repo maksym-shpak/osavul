@@ -5,6 +5,8 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 /// Повертає фізичні номери рядків `fn` порожніх тестів у порядку появи.
+///
+/// `Err`, якщо `rustc` не запустився, текст не розбирається або дужки незбалансовані.
 pub fn find_empty_tests(source: &str) -> Result<Vec<usize>, String> {
     check_syntax(source)?;
     let tokens = lex(source.strip_prefix('\u{feff}').unwrap_or(source))?;
@@ -14,6 +16,7 @@ pub fn find_empty_tests(source: &str) -> Result<Vec<usize>, String> {
     Ok(lines)
 }
 
+/// Перевіряє синтаксис через локальний `rustc`; `Err` — `rustc` не запустився або відхилив текст.
 fn check_syntax(source: &str) -> Result<(), String> {
     // -Z потребує RUSTC_BOOTSTRAP; змінна ставиться лише дочірньому процесу.
     let mut child = Command::new("rustc")
@@ -61,16 +64,18 @@ struct Token {
     line: usize,
 }
 
-// Текст уже пройшов розбір rustc, тому поза літералами й коментарями будь-який
-// не-ASCII символ, що не є пробілом, належить ідентифікатору (XID без таблиць Unicode).
+/// Пробіл або знак напрямку `\u{200e}`/`\u{200f}`, який не може входити до ідентифікатора.
 fn is_pattern_ws(c: char) -> bool {
     c.is_whitespace() || matches!(c, '\u{200e}' | '\u{200f}')
 }
 
+/// Передумова: текст уже пройшов розбір `rustc`, тому поза літералами й коментарями будь-який
+/// не-ASCII символ, що не є пробілом, належить ідентифікатору. Тож таблиці XID Unicode не потрібні.
 fn is_ident_start(c: char) -> bool {
     c == '_' || c.is_ascii_alphabetic() || (!c.is_ascii() && !is_pattern_ws(c))
 }
 
+/// Діє та сама передумова, що й для `is_ident_start`.
 fn is_ident_continue(c: char) -> bool {
     c == '_' || c.is_ascii_alphanumeric() || (!c.is_ascii() && !is_pattern_ws(c))
 }
@@ -372,6 +377,11 @@ fn skip_item(tokens: &[Token], close_of: &[usize], mut i: usize, end: usize) -> 
     end
 }
 
+/// Обходить елементи діапазону токенів і рекурсивно входить у вбудовані `mod { .. }`.
+///
+/// Знахідка — звичайна `fn` без `async`, `const`, `unsafe` й `extern`, з єдиним зовнішнім атрибутом
+/// `#[test]`, без doc-коментаря й з порожнім тілом `{}`. До `found` потрапляє рядок ключового слова
+/// `fn`.
 fn walk_items(
     tokens: &[Token],
     close_of: &[usize],

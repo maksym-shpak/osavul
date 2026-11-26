@@ -1,3 +1,12 @@
+//! Інтеграційні тести командного інтерфейсу: запускають зібраний бінарник і читають лише код
+//! виходу, `stdout` і `stderr`. Охороняють інваріанти «Знахідки»
+//! (`docs/domain/entities/finding.md`, «Інваріанти») та звітів складності, покриття й дублювання
+//! (`complexity-report.md`, `coverage-report.md`, `duplication-report.md`: «Стани й інваріанти»;
+//! для покриття ще «Межа перевірки»). Гарантії: код 0 — повний звіт чи відсутність знахідок, 1 —
+//! неповний звіт чи знахідки, 2 — помилка аргументів, джерела чи Git з порожнім `stdout` і
+//! діагностикою в `stderr`; байтова повторюваність виводу; збереження результатів решти файлів при
+//! збої одного.
+
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -68,6 +77,7 @@ fn check_without_path_is_usage_error() {
     assert_usage_error(&["check"]);
 }
 
+// Виявляє прийняття зайвих чи неправильно записаних аргументів замість коду 2.
 #[test]
 fn extra_argument_is_usage_error() {
     assert_usage_error(&["--version", "extra"]);
@@ -129,6 +139,7 @@ fn assert_check_error(args: &[&str]) {
     assert!(!out.stderr.is_empty());
 }
 
+// Виявляє хибні спрацювання чи пропуски правила на корпусі та відмінність двох запусків.
 #[test]
 fn corpus_matches_expected_tsv() {
     let dir = "tests/fixtures/empty-rust-test";
@@ -158,6 +169,7 @@ fn corpus_matches_expected_tsv() {
     assert_eq!(count, 6);
 }
 
+// Виявляє зміну порядку знахідок або номера рядка `fn` при CRLF і багаторядковому атрибуті.
 #[test]
 fn two_findings_in_order_with_crlf_and_multiline_attribute() {
     let src = "// c\r\n#[test]\r\nfn a() {}\r\n\r\n#[\r\n  test\r\n]\r\n/* x\r\n*/ pub(crate)\r\nfn b() { /* a /* nested */ b */ // t\r\n}\r\n";
@@ -173,6 +185,7 @@ fn two_findings_in_order_with_crlf_and_multiline_attribute() {
     assert!(out.stderr.is_empty());
 }
 
+// Виявляє зсув номерів рядків через BOM або shebang.
 #[test]
 fn bom_and_shebang_keep_physical_lines() {
     let (code, out) = check_src("bom.rs", "\u{feff}#!/usr/bin/env x\n#[test]\nfn a() {}\n");
@@ -253,6 +266,7 @@ fn signature_macros_and_unicode_names_and_multiline_inner_attribute() {
     }
 }
 
+// Виявляє часткову відповідь: помилка розбору після знахідки має давати код 2 без `stdout`.
 #[test]
 fn late_expression_error_leaves_no_partial_report() {
     let path = temp_file(
@@ -272,6 +286,7 @@ fn external_module_and_unexpanded_macro_need_nothing_else() {
     );
 }
 
+// Виявляє код виходу, відмінний від 2, коли файл відсутній або не є UTF-8.
 #[test]
 fn read_errors_exit_with_two() {
     assert_check_error(&["check", "tests/fixtures/no-such-file.rs"]);
@@ -522,6 +537,7 @@ fn single_operand_with_leading_dash_is_a_revision() {
     assert_eq!(json_of(&out)["sha"], sha.as_str());
 }
 
+// Виявляє втрату успішних файлів поруч зі збійними, код виходу не 1 або різні байти двох запусків.
 #[test]
 fn per_file_failures_keep_other_files_and_are_reproducible() {
     let repo = Repo::new("failures");
@@ -1094,6 +1110,7 @@ fn local_metric_selects_methodology_and_score_key() {
     assert_eq!(json_of(&implicit)["files"][0]["cyclomatic"], 2);
 }
 
+// Виявляє код виходу не 1 або втрату JSON, коли збій одного файла робить звіт неповним.
 #[test]
 fn cognitive_file_failure_gives_incomplete_report_with_exit_one() {
     let dir = local_dir("metric-fail");
@@ -1156,6 +1173,7 @@ fn duplication_local_file_and_directory_without_git() {
     assert!(v["duplications"].as_array().unwrap().is_empty());
 }
 
+// Виявляє змішування кодів 1 (неповний звіт із JSON) і 2 (фатальна помилка без `stdout`).
 #[test]
 fn duplication_incomplete_report_exits_one_and_fatal_exits_two() {
     let dir = local_dir("dup-incomplete");
@@ -1200,6 +1218,7 @@ fn cov_lcov(path: &str) -> String {
     )
 }
 
+// Виявляє прийняття неповних чи неприпустимих аргументів `coverage` замість коду 2.
 #[test]
 fn coverage_argument_errors_are_usage_errors() {
     assert_usage_error(&["coverage"]);
