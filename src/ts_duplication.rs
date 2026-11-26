@@ -89,6 +89,233 @@ fn collapse_runs(rows: Vec<Row>) -> Vec<Row> {
     out
 }
 
+/// Мінімальна кількість рядків токенів у дублі.
+const MIN_ROWS: usize = 10;
+/// Мінімальна сумарна кількість токенів у дублі.
+const MIN_TOKENS: usize = 100;
+
+/// Входження групи: файл (індекс у вхідному зрізі) і включні фізичні рядки з нуля.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Occurrence {
+    pub file: usize,
+    pub start_line: usize,
+    pub end_line: usize,
+}
+
+/// Усі точні входження однієї максимальної послідовності, впорядковані за файлом і початком.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Group {
+    pub occurrences: Vec<Occurrence>,
+}
+
+/// Група в координатах скорочених рядків (початок і довжина), до перекладу у фізичні рядки.
+struct Candidate {
+    len: usize,
+    /// (файл, індекс першого рядка), за зростанням позиції в суфіксному масиві.
+    starts: Vec<(usize, usize)>,
+}
+
+/// Шукає групи клонів між усіма файлами й усередині кожного.
+pub fn find_groups(files: &[&Prepared]) -> Vec<Group> {
+    find_groups_with(files, std::collections::hash_map::RandomState::new())
+}
+
+/// Те саме з вибором хешера: тести підставляють хешер із постійним хешем, щоб довести, що
+/// рівність підтверджується точними ключами, а не хешами.
+fn find_groups_with<S: std::hash::BuildHasher>(files: &[&Prepared], hasher: S) -> Vec<Group> {
+    // Інтернування рядків за точною послідовністю токенів.
+    let mut ids: std::collections::HashMap<&[String], u32, S> =
+        std::collections::HashMap::with_hasher(hasher);
+    let mut seq: Vec<u32> = Vec::new();
+    let mut weight: Vec<usize> = vec![0];
+    // Для кожної глобальної позиції: (файл, рядок); для роздільника — рядок = usize::MAX.
+    let mut origin: Vec<(usize, usize)> = Vec::new();
+    let mut pending: Vec<(usize, usize, u32)> = Vec::new();
+    for (f, file) in files.iter().enumerate() {
+        for (r, row) in file.rows.iter().enumerate() {
+            let next = ids.len() as u32;
+            let id = *ids.entry(row.tokens.as_slice()).or_insert(next);
+            pending.push((f, r, id));
+        }
+        pending.push((f, usize::MAX, u32::MAX));
+    }
+    // Роздільники мають унікальні значення поза алфавітом рядків.
+    let alphabet = ids.len() as u32;
+    for (f, r, id) in pending {
+        if r == usize::MAX {
+            seq.push(alphabet + f as u32);
+            weight.push(*weight.last().unwrap());
+        } else {
+            seq.push(id);
+            weight.push(*weight.last().unwrap() + files[f].rows[r].tokens.len());
+        }
+        origin.push((f, r));
+    }
+    drop(ids);
+
+    let sa = suffix_array(&seq);
+    let lcp = lcp_array(&seq, &sa);
+    let n = seq.len();
+
+    let left_differs = |starts: &[usize]| -> bool {
+        let left = |p: usize| -> Option<u32> {
+            if origin[p].1 == 0 { None } else { Some(seq[p - 1]) }
+        };
+        let first = left(starts[0]);
+        first.is_none() || starts.iter().any(|&p| left(p) != first)
+    };
+
+    let mut candidates: Vec<Candidate> = Vec::new();
+    let mut stack: Vec<(usize, usize)> = vec![(0, 0)];
+    for i in 1..=n {
+        let cur = if i < n { lcp[i] } else { 0 };
+        let mut lb = i - 1;
+        while let Some(&(l, b)) = stack.last() {
+            if l <= cur {
+                break;
+            }
+            stack.pop();
+            lb = b;
+            if l >= MIN_ROWS && weight[sa[b] + l] - weight[sa[b]] >= MIN_TOKENS {
+                let starts: Vec<usize> = sa[b..i].to_vec();
+                if left_differs(&starts) {
+                    candidates.push(Candidate {
+                        len: l,
+                        starts: starts.iter().map(|&p| origin[p]).collect(),
+                    });
+                }
+            }
+        }
+        if stack.last().is_none_or(|t| t.0 < cur) {
+            stack.push((cur, lb));
+        }
+    }
+
+    let kept = drop_contained(&mut candidates, files.len());
+    let mut groups: Vec<Group> = kept
+        .into_iter()
+        .map(|c| {
+            let mut occurrences: Vec<Occurrence> = c
+                .starts
+                .iter()
+                .map(|&(file, s)| Occurrence {
+                    file,
+                    start_line: files[file].rows[s].start_line,
+                    end_line: files[file].rows[s + c.len - 1].end_line,
+                })
+                .collect();
+            occurrences.sort();
+            Group { occurrences }
+        })
+        .collect();
+    groups.sort_by(|a, b| a.occurrences.cmp(&b.occurrences));
+    groups
+}
+
+/// Відкидає групу, всі входження якої покриті входженнями однієї довшої групи з тим самим
+/// набором файлів.
+fn drop_contained(candidates: &mut Vec<Candidate>, file_count: usize) -> Vec<Candidate> {
+    candidates.sort_by(|a, b| b.len.cmp(&a.len));
+    let file_set = |c: &Candidate| -> Vec<usize> {
+        let mut v: Vec<usize> = c.starts.iter().map(|s| s.0).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let sets: Vec<Vec<usize>> = candidates.iter().map(file_set).collect();
+    // Входження за файлами: (початок, кінець включно, номер групи), за початком.
+    let mut per_file: Vec<Vec<(usize, usize, usize)>> = vec![Vec::new(); file_count];
+    for (g, c) in candidates.iter().enumerate() {
+        for &(f, s) in &c.starts {
+            per_file[f].push((s, s + c.len - 1, g));
+        }
+    }
+    for list in &mut per_file {
+        list.sort_unstable();
+    }
+    let covers = |h: usize, g: usize| -> bool {
+        let (hc, gc) = (&candidates[h], &candidates[g]);
+        gc.starts.iter().all(|&(f, t)| {
+            hc.starts
+                .iter()
+                .any(|&(hf, hs)| hf == f && hs <= t && t + gc.len <= hs + hc.len)
+        })
+    };
+    let mut dropped = vec![false; candidates.len()];
+    for g in 0..candidates.len() {
+        let len = candidates[g].len;
+        let (f, t) = candidates[g].starts[0];
+        let list = &per_file[f];
+        let upto = list.partition_point(|e| e.0 <= t);
+        let mut tried: Vec<usize> = Vec::new();
+        for &(_, end, h) in &list[..upto] {
+            if end + 1 >= t + len
+                && candidates[h].len > len
+                && sets[h] == sets[g]
+                && !tried.contains(&h)
+            {
+                tried.push(h);
+                if covers(h, g) {
+                    dropped[g] = true;
+                    break;
+                }
+            }
+        }
+    }
+    let all = std::mem::take(candidates);
+    all.into_iter()
+        .zip(dropped)
+        .filter_map(|(c, d)| (!d).then_some(c))
+        .collect()
+}
+
+/// Суфіксний масив подвоєнням префіксів.
+fn suffix_array(seq: &[u32]) -> Vec<usize> {
+    let n = seq.len();
+    let mut sa: Vec<usize> = (0..n).collect();
+    let mut rank: Vec<usize> = seq.iter().map(|&x| x as usize).collect();
+    let mut tmp = vec![0usize; n];
+    let mut k = 1;
+    loop {
+        let key = |i: usize| (rank[i], rank.get(i + k).map_or(0, |r| r + 1));
+        sa.sort_unstable_by_key(|&i| key(i));
+        tmp[sa[0]] = 0;
+        for w in 1..n {
+            tmp[sa[w]] = tmp[sa[w - 1]] + usize::from(key(sa[w]) != key(sa[w - 1]));
+        }
+        rank.copy_from_slice(&tmp);
+        if n == 0 || rank[sa[n - 1]] == n - 1 {
+            break;
+        }
+        k *= 2;
+    }
+    sa
+}
+
+/// Довжини спільних префіксів сусідніх суфіксів (Kasai); `lcp[i]` — для `sa[i-1]` і `sa[i]`.
+fn lcp_array(seq: &[u32], sa: &[usize]) -> Vec<usize> {
+    let n = seq.len();
+    let mut rank = vec![0usize; n];
+    for (i, &p) in sa.iter().enumerate() {
+        rank[p] = i;
+    }
+    let mut lcp = vec![0usize; n];
+    let mut h = 0usize;
+    for p in 0..n {
+        if rank[p] > 0 {
+            let q = sa[rank[p] - 1];
+            while p + h < n && q + h < n && seq[p + h] == seq[q + h] {
+                h += 1;
+            }
+            lcp[rank[p]] = h;
+            h = h.saturating_sub(1);
+        } else {
+            h = 0;
+        }
+    }
+    lcp
+}
+
 /// Байтові діапазони декларацій, чиї токени вилучаються.
 #[derive(Default)]
 struct Removals {
@@ -409,5 +636,176 @@ mod tests {
         );
         assert_eq!(prepare(b"a.ts", b"let a = ;\n"), Err(ScoreError::Syntax));
         assert_eq!(prepare(b"a.ts", b"a;\xff"), Err(ScoreError::InvalidUtf8));
+    }
+
+    mod groups {
+        use super::super::*;
+        use std::hash::{BuildHasher, Hasher};
+
+        /// Файл із рядків `(ідентифікатор, кількість токенів)`; рядок i лежить на фізичному рядку i.
+        fn file(rows: &[(&str, usize)]) -> Prepared {
+            Prepared {
+                lines: rows.len() as u64 + 1,
+                rows: rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (id, n))| Row {
+                        tokens: vec![(*id).to_owned(); *n],
+                        start_line: i,
+                        end_line: i,
+                    })
+                    .collect(),
+            }
+        }
+
+        /// Блок з `count` унікальних рядків по 10 токенів з префіксом імені.
+        fn block(prefix: &str, count: usize) -> Vec<(String, usize)> {
+            (0..count).map(|i| (format!("{prefix}{i}"), 10)).collect()
+        }
+
+        fn make(parts: &[&[(String, usize)]]) -> Prepared {
+            let rows: Vec<(&str, usize)> = parts
+                .iter()
+                .flat_map(|p| p.iter().map(|(s, n)| (s.as_str(), *n)))
+                .collect();
+            file(&rows)
+        }
+
+        fn occs(groups: &[Group]) -> Vec<Vec<(usize, usize, usize)>> {
+            groups
+                .iter()
+                .map(|g| {
+                    g.occurrences
+                        .iter()
+                        .map(|o| (o.file, o.start_line, o.end_line))
+                        .collect()
+                })
+                .collect()
+        }
+
+        fn run(files: &[Prepared]) -> Vec<Group> {
+            let refs: Vec<&Prepared> = files.iter().collect();
+            find_groups(&refs)
+        }
+
+        #[test]
+        fn thresholds_are_inclusive_on_rows_and_tokens() {
+            let s10 = block("s", 10);
+            let pair = |a: &[(String, usize)]| vec![make(&[a]), make(&[a])];
+            assert_eq!(occs(&run(&pair(&s10))), [[(0, 0, 9), (1, 0, 9)]]);
+            // 9 рядків по 12 токенів: токенів досить, рядків ні.
+            let s9: Vec<_> = (0..9).map(|i| (format!("s{i}"), 12)).collect();
+            assert!(run(&pair(&s9)).is_empty());
+            // 10 рядків: 99 токенів — ні, 100 — так.
+            let mut t99 = block("s", 10);
+            t99[0].1 = 9;
+            assert!(run(&pair(&t99)).is_empty());
+            t99[0].1 = 10;
+            assert_eq!(run(&pair(&t99)).len(), 1);
+        }
+
+        struct ConstState;
+        struct ConstHasher;
+        impl Hasher for ConstHasher {
+            fn finish(&self) -> u64 {
+                0
+            }
+            fn write(&mut self, _: &[u8]) {}
+        }
+        impl BuildHasher for ConstState {
+            type Hasher = ConstHasher;
+            fn build_hasher(&self) -> ConstHasher {
+                ConstHasher
+            }
+        }
+
+        #[test]
+        fn forced_hash_collision_keeps_exact_equality() {
+            let a = block("s", 10);
+            let b = block("t", 10);
+            let files = [make(&[&a]), make(&[&b]), make(&[&a])];
+            let refs: Vec<&Prepared> = files.iter().collect();
+            let groups = find_groups_with(&refs, ConstState);
+            assert_eq!(occs(&groups), [[(0, 0, 9), (2, 0, 9)]]);
+            let files = [make(&[&a]), make(&[&b])];
+            let refs: Vec<&Prepared> = files.iter().collect();
+            assert!(find_groups_with(&refs, ConstState).is_empty());
+        }
+
+        #[test]
+        fn extends_both_ways_and_stops_at_file_boundary() {
+            let (x, s, y, z) = (block("x", 3), block("s", 10), block("y", 3), block("z", 3));
+            // Спільне ядро з різними контекстами: рівно 10 рядків.
+            let files = [make(&[&x, &s, &y]), make(&[&z, &s, &x])];
+            assert_eq!(occs(&run(&files)), [[(0, 3, 12), (1, 3, 12)]]);
+            // Продовження ліворуч до початку файла: група охоплює і спільний префікс.
+            let files = [make(&[&s, &y]), make(&[&x, &s, &z])];
+            assert_eq!(occs(&run(&files)), [[(0, 0, 9), (1, 3, 12)]]);
+        }
+
+        #[test]
+        fn group_has_every_start_including_overlaps() {
+            let (p, f, g) = (block("p", 10), block("f", 1), block("g", 1));
+            // Три входження з різними контекстами лишаються в одній групі.
+            let groups = run(&[make(&[&p, &f, &p, &g, &p])]);
+            assert_eq!(occs(&groups), [[(0, 0, 9), (0, 11, 20), (0, 22, 31)]]);
+            // Перекривні старти: триразовий вплив поглинається довшою групою з двох входжень.
+            let groups = run(&[make(&[&p, &p, &p])]);
+            assert_eq!(occs(&groups), [[(0, 0, 19), (0, 10, 29)]]);
+        }
+
+        #[test]
+        fn dense_repeat_collapses_into_one_longest_group() {
+            let p = block("p", 10);
+            let f = make(&[&p, &p, &p, &p, &p, &p]);
+            assert_eq!(occs(&run(&[f])), [[(0, 0, 49), (0, 10, 59)]]);
+        }
+
+        #[test]
+        fn contained_group_is_dropped_only_when_all_occurrences_are_covered() {
+            let (s, q, f1, f2, f3) = (
+                block("s", 10),
+                block("q", 1),
+                block("f", 9),
+                block("g", 9),
+                block("h", 9),
+            );
+            let l: Vec<(String, usize)> = [s.clone(), q.clone(), s.clone()].concat();
+            let a = make(&[&l, &f1, &l]);
+            // Усі чотири входження S лежать у двох копіях L: S відкинуто.
+            let groups = run(&[make(&[&l, &f1, &l])]);
+            assert_eq!(occs(&groups), [[(0, 0, 20), (0, 30, 50)]]);
+            // Інший набір файлів зберігає S.
+            let groups = run(&[a.clone_prepared(), make(&[&s])]);
+            assert_eq!(groups.len(), 2);
+            // Непокрите входження зберігає S.
+            let groups = run(&[make(&[&l, &f1, &l, &f2, &s, &f3])]);
+            assert_eq!(groups.len(), 2);
+        }
+
+        #[test]
+        fn coverage_by_several_groups_does_not_absorb() {
+            let (p, s, q, fa, fb) = (
+                block("p", 10),
+                block("s", 10),
+                block("q", 10),
+                block("a", 9),
+                block("b", 9),
+            );
+            let files = [
+                make(&[&p, &s, &fa, &s, &q]),
+                make(&[&p, &s, &fb, &s, &q]),
+            ];
+            assert_eq!(run(&files).len(), 3);
+        }
+
+        impl Prepared {
+            fn clone_prepared(&self) -> Prepared {
+                Prepared {
+                    lines: self.lines,
+                    rows: self.rows.clone(),
+                }
+            }
+        }
     }
 }
