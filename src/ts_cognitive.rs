@@ -20,8 +20,9 @@ use oxc_ast::ast::{
     AccessorProperty, ArrowFunctionExpression, BreakStatement, CallExpression, CatchClause,
     ConditionalExpression, ContinueStatement, DoWhileStatement, Expression, ForInStatement,
     ForOfStatement, ForStatement, Function, IfStatement, LogicalExpression, LogicalOperator,
-    MethodDefinition, MethodDefinitionKind, PropertyDefinition, PropertyKey, Statement,
-    StaticBlock, SwitchStatement, WhileStatement,
+    MethodDefinition, MethodDefinitionKind, ObjectProperty, PropertyDefinition, PropertyKey,
+    Statement, StaticBlock, SwitchStatement, TSInterfaceDeclaration, TSSignature, TSType,
+    WhileStatement,
 };
 use oxc_ast_visit::{Visit, walk};
 
@@ -34,6 +35,7 @@ pub fn score(path: &[u8], content: &[u8]) -> Result<u64, ScoreError> {
             in_function: false,
             name: None,
             class_method: false,
+            pending_name: None,
         };
         counter.visit_program(program);
         counter.total
@@ -49,19 +51,15 @@ struct Counter {
     name: Option<String>,
     /// Найближча функція — метод класу, тож `this.name()` теж є самовикликом.
     class_method: bool,
+    /// Ім'я методу об'єктного літерала для найближчого функціонального виразу.
+    pending_name: Option<String>,
 }
 
 impl Counter {
     // Вкладена функція піднімає рівень лише всередині іншої функції чи конструкції, що
     // вкладає; прямий ініціалізатор чи колбек на рівні модуля, а також метод класу
     // (`top`), починають з нуля.
-    fn function<F: FnOnce(&mut Self)>(
-        &mut self,
-        name: Option<String>,
-        class_method: bool,
-        top: bool,
-        f: F,
-    ) {
+    fn function<F: FnOnce(&mut Self)>(&mut self, top: bool, f: F) {
         let saved = (
             self.nesting,
             self.in_function,
@@ -74,8 +72,9 @@ impl Counter {
             self.nesting += 1;
         }
         self.in_function = true;
-        self.name = name;
-        self.class_method = class_method;
+        // Ім'я для рекурсії активується лише на час тіла (див. `body`).
+        self.name = None;
+        self.class_method = false;
         f(self);
         (self.nesting, self.in_function, self.name, self.class_method) = saved;
     }
@@ -94,6 +93,17 @@ impl Counter {
         self.class_method = false;
         f(self);
         (self.nesting, self.in_function, self.name, self.class_method) = saved;
+    }
+
+    // Параметри обходяться без імені функції: самовиклик в ініціалізаторі параметра
+    // не є самовикликом у тілі. Типи, повернення й `this`-параметр пропускаються.
+    fn function_parts<'a>(&mut self, it: &Function<'a>, name: Option<String>, class_method: bool) {
+        self.visit_formal_parameters(&it.params);
+        self.name = name;
+        self.class_method = class_method;
+        if let Some(body) = &it.body {
+            self.visit_function_body(body);
+        }
     }
 
     /// `+1 + рівень` для конструкції, що вкладається.
@@ -237,14 +247,36 @@ impl<'a> Visit<'a> for Counter {
     }
 
     fn visit_function(&mut self, it: &Function<'a>, flags: oxc_syntax::scope::ScopeFlags) {
-        let name = it.id.as_ref().map(|id| id.name.to_string());
-        self.function(name, false, false, |c| walk::walk_function(c, it, flags));
+        let _ = flags;
+        let name = self
+            .pending_name
+            .take()
+            .or_else(|| it.id.as_ref().map(|id| id.name.to_string()));
+        self.function(false, |c| c.function_parts(it, name, false));
     }
 
+    // Метод об'єктного літерала бере ім'я з простого необчислюваного ключа.
+    fn visit_object_property(&mut self, it: &ObjectProperty<'a>) {
+        if it.method
+            && let PropertyKey::StaticIdentifier(id) = &it.key
+        {
+            self.pending_name = Some(id.name.to_string());
+        }
+        self.visit_property_key(&it.key);
+        self.visit_expression(&it.value);
+        self.pending_name = None;
+    }
+
+    // Конструкції рівня типів не виконуються: їхні ключі й вирази не рахуються.
+    fn visit_ts_type(&mut self, _it: &TSType<'a>) {}
+
+    fn visit_ts_signature(&mut self, _it: &TSSignature<'a>) {}
+
+    fn visit_ts_interface_declaration(&mut self, _it: &TSInterfaceDeclaration<'a>) {}
+
     fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
-        self.function(None, false, false, |c| {
-            walk::walk_arrow_function_expression(c, it)
-        });
+        self.pending_name = None;
+        self.function(false, |c| walk::walk_arrow_function_expression(c, it));
     }
 
     fn visit_method_definition(&mut self, it: &MethodDefinition<'a>) {
@@ -259,9 +291,7 @@ impl<'a> Visit<'a> for Counter {
             _ => None,
         };
         let class_method = name.is_some();
-        self.function(name, class_method, true, |c| {
-            walk::walk_function(c, &it.value, oxc_syntax::scope::ScopeFlags::Function)
-        });
+        self.function(true, |c| c.function_parts(&it.value, name, class_method));
     }
 
     fn visit_property_definition(&mut self, it: &PropertyDefinition<'a>) {
@@ -464,6 +494,10 @@ mod tests {
             s("type T<A> = A extends string ? 1 : 2; interface I { m(): void }"),
             0
         );
+        assert_eq!(
+            s("interface I { [f(a || b)](): void } let x: { [f(a || b)]: 1 };"),
+            0
+        );
         assert_eq!(s("declare function d(a: number): void;"), 0);
         assert_eq!(s("function o(a: number): void; function o(a: any) {}"), 0);
     }
@@ -562,6 +596,12 @@ mod tests {
     fn direct_self_calls_count_per_call() {
         assert_eq!(s("function f() { f(); f(); }"), 2);
         assert_eq!(s("function f(n) { return n && f(n - 1); }"), 2);
+        assert_eq!(s("function r(v = r(0)) { return v; }"), 0);
+        assert_eq!(s("function r(v = a ? r(0) : 1) { return r(v); }"), 2);
+        assert_eq!(
+            s("const o = { down(n) { return n > 0 ? down(n - 1) : 0; } };"),
+            2
+        );
     }
 
     #[test]
