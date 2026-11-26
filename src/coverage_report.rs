@@ -26,24 +26,123 @@ pub enum Owner {
 }
 
 pub struct Matcher {
+    rules: PathRules,
     root: Comps,
+    /// Скільки перших компонентів `root` — префікс диска чи ресурсу.
+    root_floor: usize,
     index: HashMap<Vec<u8>, usize>,
     tests: Vec<Vec<u8>>,
 }
 
-fn split(path: &[u8]) -> impl Iterator<Item = &[u8]> {
-    path.split(|b| *b == b'/').filter(|c| !c.is_empty())
+/// Правила розбору шляху. Нативний виклик обирає правила цільової ОС; юніт-тести застосовують
+/// Windows-правила до синтетичних шляхів на будь-якому хості.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathRules {
+    /// Роздільник лише `/`; `\` і `:` — звичайні байти імені.
+    Posix,
+    /// Роздільники `/` і `\`, диск, UNC-ресурс та розширений префікс `\\?\`.
+    Windows,
 }
 
-/// Лексично дописує `rel` до `base`, враховуючи `.` і `..`. Без `keep_up` вихід над корінь файлової
-/// системи ігнорується, з ним — лишається ведучими `..`.
-fn normalize(base: &[Vec<u8>], rel: &[u8], keep_up: bool) -> Comps {
+impl PathRules {
+    pub const NATIVE: PathRules = if cfg!(windows) {
+        PathRules::Windows
+    } else {
+        PathRules::Posix
+    };
+
+    fn is_sep(self, b: u8) -> bool {
+        b == b'/' || (self == PathRules::Windows && b == b'\\')
+    }
+
+    fn split(self, path: &[u8]) -> impl Iterator<Item = &[u8]> {
+        path.split(move |b| self.is_sep(*b))
+            .filter(|c| !c.is_empty())
+    }
+}
+
+/// Результат розбору шляху за правилами.
+#[derive(Debug, PartialEq, Eq)]
+enum Parsed<'a> {
+    Relative(&'a [u8]),
+    /// `prefix` — ідентичність диска чи UNC-ресурсу; `None` для POSIX і шляху від кореня без диска.
+    Absolute {
+        prefix: Option<Vec<u8>>,
+        rest: &'a [u8],
+    },
+    /// Форма без лексичного змісту: диск без кореня (`C:a`), неповний UNC, невідомий префікс.
+    Unsupported,
+}
+
+fn drive_at(p: &[u8]) -> Option<u8> {
+    (p.len() >= 2 && p[0].is_ascii_alphabetic() && p[1] == b':').then(|| p[0].to_ascii_uppercase())
+}
+
+fn parse<'a>(rules: PathRules, p: &'a [u8]) -> Parsed<'a> {
+    if rules == PathRules::Posix {
+        return if p.first() == Some(&b'/') {
+            Parsed::Absolute {
+                prefix: None,
+                rest: p,
+            }
+        } else {
+            Parsed::Relative(p)
+        };
+    }
+    let sep = |i: usize| p.get(i).is_some_and(|b| rules.is_sep(*b));
+    let drive = |p: &'a [u8]| match drive_at(p) {
+        Some(letter) if p.len() == 2 || rules.is_sep(p[2]) => Some(Parsed::Absolute {
+            prefix: Some(vec![letter, b':']),
+            rest: &p[2..],
+        }),
+        Some(_) => Some(Parsed::Unsupported),
+        None => None,
+    };
+    let unc = |p: &'a [u8]| {
+        let mut parts = p.splitn(3, |b| rules.is_sep(*b));
+        let (server, share) = (parts.next()?, parts.next()?);
+        if server.is_empty() || share.is_empty() {
+            return None;
+        }
+        let mut id = b"\\\\".to_vec();
+        id.extend(server.to_ascii_lowercase());
+        id.push(b'\\');
+        id.extend(share.to_ascii_lowercase());
+        Some(Parsed::Absolute {
+            prefix: Some(id),
+            rest: parts.next().unwrap_or(b""),
+        })
+    };
+    if sep(0) && sep(1) {
+        // `\\?\` і `\\.\`: розширена форма; `\\сервер\ресурс`: звичайний UNC.
+        if matches!(p.get(2), Some(b'?' | b'.')) && sep(3) {
+            let rest = &p[4..];
+            if rest.len() >= 4 && rest[..3].eq_ignore_ascii_case(b"UNC") && rules.is_sep(rest[3]) {
+                return unc(&rest[4..]).unwrap_or(Parsed::Unsupported);
+            }
+            return drive(rest).unwrap_or(Parsed::Unsupported);
+        }
+        return unc(&p[2..]).unwrap_or(Parsed::Unsupported);
+    }
+    if sep(0) {
+        return Parsed::Absolute {
+            prefix: None,
+            rest: p,
+        };
+    }
+    drive(p).unwrap_or(Parsed::Relative(p))
+}
+
+/// Лексично дописує `rel` до `base`, враховуючи `.` і `..`. `..` не знімає перших `floor`
+/// компонентів (префікс диска чи ресурсу). Без `keep_up` вихід над корінь ігнорується, з ним —
+/// лишається ведучими `..`.
+fn normalize(rules: PathRules, base: &[Vec<u8>], floor: usize, rel: &[u8], keep_up: bool) -> Comps {
     let mut out: Comps = base.to_vec();
-    for part in split(rel) {
+    for part in rules.split(rel) {
         match part {
             b"." => {}
             b".." => match out.last() {
-                Some(last) if last.as_slice() != b".." => {
+                Some(last) if out.len() > floor && last.as_slice() != b".." => {
                     out.pop();
                 }
                 _ if keep_up => out.push(part.to_vec()),
@@ -53,6 +152,20 @@ fn normalize(base: &[Vec<u8>], rel: &[u8], keep_up: bool) -> Comps {
         }
     }
     out
+}
+
+/// Абсолютні компоненти шляху (першим іде префікс, якщо він є) і кількість захищених компонентів.
+/// Відносний шлях дає порожню базу.
+fn absolute(rules: PathRules, p: &[u8]) -> Option<(Comps, usize)> {
+    match parse(rules, p) {
+        Parsed::Relative(rest) => Some((normalize(rules, &[], 0, rest, false), 0)),
+        Parsed::Absolute { prefix, rest } => {
+            let base: Comps = prefix.into_iter().collect();
+            let floor = base.len();
+            Some((normalize(rules, &base, floor, rest, false), floor))
+        }
+        Parsed::Unsupported => None,
+    }
 }
 
 fn os_bytes(s: &OsStr) -> Vec<u8> {
@@ -68,19 +181,23 @@ fn os_bytes(s: &OsStr) -> Vec<u8> {
 
 /// Перевіряє шляхи `--tests`: відносні, усередині кореня. Існування на диску не потрібне.
 pub fn parse_tests(args: &[&OsStr]) -> Result<Vec<Vec<u8>>, String> {
+    parse_tests_with(PathRules::NATIVE, args)
+}
+
+pub fn parse_tests_with(rules: PathRules, args: &[&OsStr]) -> Result<Vec<Vec<u8>>, String> {
     args.iter()
         .map(|arg| {
             let bytes = os_bytes(arg);
             if bytes.is_empty() {
                 return Err("--tests: порожній шлях".to_string());
             }
-            if bytes.first() == Some(&b'/') {
+            let Parsed::Relative(rest) = parse(rules, &bytes) else {
                 return Err(format!(
                     "--tests: шлях має бути відносним: {}",
                     arg.to_string_lossy()
                 ));
-            }
-            let comps = normalize(&[], &bytes, true);
+            };
+            let comps = normalize(rules, &[], 0, rest, true);
             if comps.first().is_some_and(|c| c.as_slice() == b"..") {
                 return Err(format!(
                     "--tests: шлях виходить за корінь: {}",
@@ -95,18 +212,22 @@ pub fn parse_tests(args: &[&OsStr]) -> Result<Vec<Vec<u8>>, String> {
 impl Matcher {
     /// `root` — абсолютна канонічна тека, `keys` — повний інвентар у його порядку, `tests` —
     /// результат `parse_tests`.
-    pub fn new<'a>(
+    pub fn with_rules<'a>(
+        rules: PathRules,
         root: &[u8],
         keys: impl IntoIterator<Item = &'a [u8]>,
         tests: Vec<Vec<u8>>,
     ) -> Self {
+        let (root_comps, root_floor) = absolute(rules, root).unwrap_or_default();
         let index = keys
             .into_iter()
             .enumerate()
             .map(|(i, k)| (k.to_vec(), i))
             .collect();
         Matcher {
-            root: normalize(&[], root, false),
+            rules,
+            root: root_comps,
+            root_floor,
             index,
             tests,
         }
@@ -120,14 +241,26 @@ impl Matcher {
 
     /// Ключі-кандидати під коренем у порядку пошуку. `report_dir` — абсолютна канонічна тека звіту.
     fn candidates(&self, report_dir: &[u8], sf: &[u8]) -> Vec<Vec<u8>> {
+        let rules = self.rules;
         let under_root = |full: Comps| {
             full.starts_with(&self.root)
                 .then(|| full[self.root.len()..].join(&b'/'))
         };
-        if sf.first() == Some(&b'/') {
-            return under_root(normalize(&[], sf, false)).into_iter().collect();
+        match parse(rules, sf) {
+            Parsed::Unsupported => return Vec::new(),
+            Parsed::Absolute { prefix, rest } => {
+                let base: Comps = prefix.into_iter().collect();
+                let floor = base.len();
+                return under_root(normalize(rules, &base, floor, rest, false))
+                    .into_iter()
+                    .collect();
+            }
+            Parsed::Relative(_) => {}
         }
-        let dir = normalize(&[], report_dir, false);
+        let Some((dir, _)) = absolute(rules, report_dir) else {
+            return Vec::new();
+        };
+        let base_floor = self.root_floor;
         let bases: Vec<Comps> = if dir.starts_with(&self.root) {
             (self.root.len()..=dir.len())
                 .rev()
@@ -138,7 +271,7 @@ impl Matcher {
         };
         bases
             .iter()
-            .filter_map(|base| under_root(normalize(base, sf, false)))
+            .filter_map(|base| under_root(normalize(rules, base, base_floor, sf, false)))
             .collect()
     }
 
@@ -159,7 +292,7 @@ impl Matcher {
                 Owner::Main(idx)
             };
         }
-        let ts = normalize(&[], sf, true)
+        let ts = normalize(self.rules, &[], 0, sf, true)
             .last()
             .is_some_and(|name| name.ends_with(b".ts"));
         if !ts || candidates.iter().any(|key| self.is_test(key)) {
@@ -299,7 +432,18 @@ pub fn build(
     reports: &[LcovInput],
     tests: Vec<Vec<u8>>,
 ) -> Report {
-    let matcher = Matcher::new(root, files.iter().map(|f| f.path.as_slice()), tests);
+    build_with(PathRules::NATIVE, origin, root, files, reports, tests)
+}
+
+pub fn build_with(
+    rules: PathRules,
+    origin: Origin<'_>,
+    root: &[u8],
+    files: Vec<FileInput>,
+    reports: &[LcovInput],
+    tests: Vec<Vec<u8>>,
+) -> Report {
+    let matcher = Matcher::with_rules(rules, root, files.iter().map(|f| f.path.as_slice()), tests);
     let parsed: Vec<lcov::Report> = reports.iter().map(|r| lcov::parse(&r.bytes)).collect();
     let mut orphan = false;
     let mut groups: Vec<Vec<&lcov::Block>> = vec![Vec::new(); files.len()];
@@ -458,17 +602,58 @@ mod tests {
     const ROOT: &str = "/work/corpus";
     const DEFAULT_INVENTORY: &str = "src/main.ts,src/fallback.ts,src/broken.ts,tests/example.ts";
 
-    fn matcher(inventory: &str, tests: &str) -> Matcher {
+    /// Один набір входів зіставлення: правила й форми кореня, теки звіту та абсолютного `SF`.
+    struct Form {
+        rules: PathRules,
+        /// Корінь, як його повертає канонізація.
+        root: &'static str,
+        /// Підстановка `{root}` у фрагментах LCOV.
+        sf_root: &'static str,
+        /// Тека звіту поза коренем.
+        outside: &'static str,
+    }
+
+    const POSIX: Form = Form {
+        rules: PathRules::Posix,
+        root: ROOT,
+        sf_root: ROOT,
+        outside: "/elsewhere/reports",
+    };
+    const WINDOWS_PLAIN: Form = Form {
+        rules: PathRules::Windows,
+        root: "C:\\work\\corpus",
+        sf_root: "C:/work/corpus",
+        outside: "D:\\elsewhere\\reports",
+    };
+    // Канонізація Windows дає розширену форму, а LCOV міг записати звичайну іншого регістру.
+    const WINDOWS_VERBATIM: Form = Form {
+        rules: PathRules::Windows,
+        root: "\\\\?\\C:\\work\\corpus",
+        sf_root: "c:\\work\\corpus",
+        outside: "\\\\?\\UNC\\srv\\share\\reports",
+    };
+    const FORMS: [&Form; 3] = [&POSIX, &WINDOWS_PLAIN, &WINDOWS_VERBATIM];
+
+    fn tests_of(rules: PathRules, tests: &str) -> Vec<Vec<u8>> {
         let tests: Vec<&OsStr> = tests
             .split(',')
             .filter(|t| *t != "-")
             .map(OsStr::new)
             .collect();
-        Matcher::new(
-            ROOT.as_bytes(),
+        parse_tests_with(rules, &tests).unwrap()
+    }
+
+    fn matcher_in(form: &Form, inventory: &str, tests: &str) -> Matcher {
+        Matcher::with_rules(
+            form.rules,
+            form.root.as_bytes(),
             inventory.split(',').map(str::as_bytes),
-            parse_tests(&tests).unwrap(),
+            tests_of(form.rules, tests),
         )
+    }
+
+    fn matcher(inventory: &str, tests: &str) -> Matcher {
+        matcher_in(&POSIX, inventory, tests)
     }
 
     fn fragment(dir: &Path, file: &str, name: &str) -> String {
@@ -486,11 +671,161 @@ mod tests {
 
     #[test]
     fn tests_arguments_must_be_relative_and_inside_root() {
-        let ok = parse_tests(&[OsStr::new("test/"), OsStr::new("./a/../b.ts")]).unwrap();
-        assert_eq!(ok, vec![b"test".to_vec(), b"b.ts".to_vec()]);
-        assert!(parse_tests(&[OsStr::new("/abs")]).is_err());
-        assert!(parse_tests(&[OsStr::new("..")]).is_err());
-        assert!(parse_tests(&[OsStr::new("a/../../b")]).is_err());
+        for rules in [PathRules::Posix, PathRules::Windows] {
+            let ok =
+                parse_tests_with(rules, &[OsStr::new("test/"), OsStr::new("./a/../b.ts")]).unwrap();
+            assert_eq!(ok, vec![b"test".to_vec(), b"b.ts".to_vec()], "{rules:?}");
+            for bad in ["/abs", "..", "a/../../b", ""] {
+                assert!(
+                    parse_tests_with(rules, &[OsStr::new(bad)]).is_err(),
+                    "{rules:?} {bad}"
+                );
+            }
+        }
+    }
+
+    // Виявляє приймання `--tests`, що за Windows-правилами не є відносним усередині кореня.
+    #[test]
+    fn windows_tests_arguments_reject_every_absolute_form() {
+        let w = PathRules::Windows;
+        let ok = parse_tests_with(w, &[OsStr::new("a\\b\\..\\c.ts")]).unwrap();
+        assert_eq!(ok, vec![b"a/c.ts".to_vec()]);
+        for bad in [
+            "C:\\x",
+            "C:/x",
+            "C:x",
+            "\\abs",
+            "\\\\srv\\share\\x",
+            "\\\\?\\C:\\x",
+            "a\\..\\..\\b",
+        ] {
+            assert!(parse_tests_with(w, &[OsStr::new(bad)]).is_err(), "{bad}");
+        }
+        // У POSIX зворотна скісна риска й двокрапка належать імені.
+        let p = parse_tests_with(PathRules::Posix, &[OsStr::new("C:\\x")]).unwrap();
+        assert_eq!(p, vec![b"C:\\x".to_vec()]);
+    }
+
+    fn resolve_in(form: &Form, report_dir: &str, sf: &str, inventory: &str) -> Owner {
+        matcher_in(form, inventory, "-").resolve(report_dir.as_bytes(), sf.as_bytes())
+    }
+
+    // Виявляє змішування дисків і ресурсів, префікса за текстом і форм кореня.
+    #[test]
+    fn windows_absolute_sf_matches_only_inside_the_same_root() {
+        let w = PathRules::Windows;
+        let inv = "src/a.ts";
+        for root in [
+            "C:\\work\\corpus",
+            "c:/WORK/corpus".replace("WORK", "work").as_str(),
+            "\\\\?\\C:\\work\\corpus",
+            "\\\\.\\C:\\work\\corpus",
+        ] {
+            let m = Matcher::with_rules(w, root.as_bytes(), [inv.as_bytes()], vec![]);
+            for sf in [
+                "C:\\work\\corpus\\src\\a.ts",
+                "c:/work/corpus/src/./x/../a.ts",
+                "\\\\?\\C:\\work\\corpus\\src\\a.ts",
+                "//?/c:/work/corpus/src/a.ts",
+            ] {
+                assert_eq!(
+                    m.resolve(root.as_bytes(), sf.as_bytes()),
+                    Owner::Main(0),
+                    "{root} {sf}"
+                );
+            }
+            for sf in [
+                "D:\\work\\corpus\\src\\a.ts",
+                "C:\\work\\corpus2\\src\\a.ts",
+                "C:\\work\\Corpus\\src\\a.ts",
+                "C:\\work\\corpus\\src\\A.ts",
+                "C:\\work\\src\\a.ts",
+                "C:\\work\\corpus\\..\\x\\src\\a.ts",
+                "\\work\\corpus\\src\\a.ts",
+                "\\\\srv\\share\\work\\corpus\\src\\a.ts",
+                "C:src\\a.ts",
+            ] {
+                assert_eq!(
+                    m.resolve(root.as_bytes(), sf.as_bytes()),
+                    Owner::Unresolved,
+                    "{root} {sf}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn windows_unc_root_distinguishes_share_and_accepts_extended_form() {
+        let w = PathRules::Windows;
+        let m = Matcher::with_rules(
+            w,
+            b"\\\\?\\UNC\\Srv\\Share\\proj",
+            [b"a.ts".as_slice()],
+            vec![],
+        );
+        let dir = b"\\\\?\\UNC\\Srv\\Share\\proj\\reports";
+        for sf in [
+            "\\\\srv\\share\\proj\\a.ts",
+            "//SRV/SHARE/proj/a.ts",
+            "\\\\?\\UNC\\srv\\share\\proj\\a.ts",
+            "..\\a.ts",
+            "a.ts",
+        ] {
+            assert_eq!(m.resolve(dir, sf.as_bytes()), Owner::Main(0), "{sf}");
+        }
+        for sf in [
+            "\\\\srv\\other\\proj\\a.ts",
+            "\\\\other\\share\\proj\\a.ts",
+            "\\\\srv\\share\\proj2\\a.ts",
+            "\\\\srv\\share\\a.ts",
+            "C:\\proj\\a.ts",
+        ] {
+            assert_eq!(m.resolve(dir, sf.as_bytes()), Owner::Unresolved, "{sf}");
+        }
+    }
+
+    // `..` у відносному SF не виходить за префікс диска чи ресурсу.
+    #[test]
+    fn windows_relative_sf_search_goes_up_to_root_and_never_past_the_prefix() {
+        let f = &WINDOWS_PLAIN;
+        let inv = "src/a.ts,pkg/src/a.ts";
+        assert_eq!(
+            resolve_in(f, "C:\\work\\corpus\\pkg\\r", "src\\a.ts", inv),
+            Owner::Main(1)
+        );
+        assert_eq!(
+            resolve_in(f, "C:/work/corpus/pkg/r", "..\\..\\src\\a.ts", inv),
+            Owner::Main(0)
+        );
+        assert_eq!(
+            resolve_in(
+                f,
+                "C:\\work\\corpus",
+                "..\\..\\..\\..\\work\\corpus\\src\\a.ts",
+                inv
+            ),
+            Owner::Main(0)
+        );
+        // Тека звіту на іншому диску бачить лише корінь.
+        assert_eq!(resolve_in(f, "D:\\r", "src\\a.ts", inv), Owner::Main(0));
+        assert_eq!(
+            resolve_in(f, "D:\\r", "..\\src\\a.ts", inv),
+            Owner::Unresolved
+        );
+        // Нерозв'язаний SF зберігає вихідні байти, а не нормалізований ключ.
+        let lcov = lcov_in(
+            "C:\\work\\corpus",
+            "SF:src\\nope.ts\nDA:1,1\nend_of_record\n",
+        );
+        let report = build_with(
+            PathRules::Windows,
+            Origin::Directory,
+            f.root.as_bytes(),
+            vec![file(b"src/a.ts", b"const a = 1;\n")],
+            &[lcov],
+            vec![],
+        );
+        assert_eq!(json_of(&report)["unresolved"][0]["path"], "src\\nope.ts");
     }
 
     // Виявляє зіставлення тестової теки за префіксом рядка замість цілого компонента шляху.
@@ -521,23 +856,29 @@ mod tests {
                 continue;
             };
             let (file, name) = input.split_once('#').unwrap();
-            let text = fragment(&dir, file, name).replace("{root}", ROOT);
-            let report = lcov::parse(text.as_bytes());
-            assert_eq!(report.blocks.len(), 1, "{}", f[0]);
-            let report_dir = match f[3] {
-                "-" => format!("{ROOT}/{}", Path::new(file).parent().unwrap().display()),
-                "!outside" => "/elsewhere/reports".to_string(),
-                place => format!("{ROOT}/{place}"),
-            };
-            let inventory = if f[6] == "-" { DEFAULT_INVENTORY } else { f[6] };
-            let m = matcher(inventory, f[4]);
-            let keys: Vec<&str> = inventory.split(',').collect();
-            let got = match m.resolve(report_dir.as_bytes(), &report.blocks[0].path) {
-                Owner::Main(i) => format!("main:{}", keys[i]),
-                Owner::Ignored => "ignored".to_string(),
-                Owner::Unresolved => "unresolved".to_string(),
-            };
-            assert_eq!(got, f[5], "{}", f[0]);
+            for form in FORMS {
+                let text = fragment(&dir, file, name).replace("{root}", form.sf_root);
+                let report = lcov::parse(text.as_bytes());
+                assert_eq!(report.blocks.len(), 1, "{}", f[0]);
+                let report_dir = match f[3] {
+                    "-" => format!(
+                        "{}/{}",
+                        form.root,
+                        Path::new(file).parent().unwrap().display()
+                    ),
+                    "!outside" => form.outside.to_string(),
+                    place => format!("{}/{place}", form.root),
+                };
+                let inventory = if f[6] == "-" { DEFAULT_INVENTORY } else { f[6] };
+                let m = matcher_in(form, inventory, f[4]);
+                let keys: Vec<&str> = inventory.split(',').collect();
+                let got = match m.resolve(report_dir.as_bytes(), &report.blocks[0].path) {
+                    Owner::Main(i) => format!("main:{}", keys[i]),
+                    Owner::Ignored => "ignored".to_string(),
+                    Owner::Unresolved => "unresolved".to_string(),
+                };
+                assert_eq!(got, f[5], "{} {:?} {}", f[0], form.rules, form.root);
+            }
             rows += 1;
         }
         assert_eq!(rows, 20);
@@ -678,102 +1019,100 @@ mod tests {
             let Some(inputs) = f[2].strip_prefix('=') else {
                 continue;
             };
-            let reports: Vec<LcovInput> = inputs
-                .split(',')
-                .filter(|i| *i != "-")
-                .map(|input| {
-                    let (file, name) = input.split_once('#').unwrap();
-                    let text = fragment(&dir, file, name).replace("{root}", ROOT);
-                    let place = Path::new(file).parent().unwrap().display();
-                    lcov_in(&format!("{ROOT}/{place}"), &text)
-                })
-                .collect();
-            let files: Vec<FileInput> = f[3]
-                .split(',')
-                .filter(|k| *k != "-")
-                .map(|key| match key.split_once('=') {
-                    None => file(key.as_bytes(), &std::fs::read(dir.join(key)).unwrap()),
-                    Some((k, "read")) => FileInput {
-                        path: k.as_bytes().to_vec(),
-                        content: Err(crate::git_tree::ReadError),
-                    },
-                    Some((k, "utf8")) => file(k.as_bytes(), b"\xff\xfe"),
-                    Some((k, "empty")) => file(k.as_bytes(), b""),
-                    Some(_) => panic!("{}: невідомий маркер {key}", f[0]),
-                })
-                .collect();
-            let tests: Vec<&OsStr> = f[4]
-                .split(',')
-                .filter(|t| *t != "-")
-                .map(OsStr::new)
-                .collect();
-            let report = build(
-                Origin::Directory,
-                ROOT.as_bytes(),
-                files,
-                &reports,
-                parse_tests(&tests).unwrap(),
-            );
-            let v = json_of(&report);
-            assert_eq!(report.complete, f[5] == "complete", "{}: complete", f[0]);
-            assert_eq!(v["complete"], report.complete, "{}", f[0]);
-            let got: Vec<String> = v["files"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|r| {
-                    let cols = [
-                        r["path"].as_str().unwrap().to_string(),
-                        r["inReport"].to_string(),
-                        num(&r["linesToCover"]),
-                        num(&r["uncoveredLines"]),
-                        num(&r["conditionsToCover"]),
-                        num(&r["uncoveredConditions"]),
-                        num(&r["lineCoverage"]),
-                        num(&r["branchCoverage"]),
-                        num(&r["coverage"]),
-                        cell(r["error"].as_str()),
-                    ];
-                    cols.join("|")
-                })
-                .collect();
-            assert_eq!(
-                cell(Some(got.join(";")).filter(|g| !g.is_empty())),
-                f[6],
-                "{}: files",
-                f[0]
-            );
-            let unresolved: Vec<&str> = v["unresolved"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|u| u["path"].as_str().unwrap())
-                .collect();
-            assert_eq!(
-                cell(Some(unresolved.join(",")).filter(|g| !g.is_empty())),
-                f[7],
-                "{}: unresolved",
-                f[0]
-            );
-            let total = &v["total"];
-            let got_total = if total.is_null() {
-                "-".to_string()
-            } else {
-                [
-                    "linesToCover",
-                    "uncoveredLines",
-                    "conditionsToCover",
-                    "uncoveredConditions",
-                    "lineCoverage",
-                    "branchCoverage",
-                    "coverage",
-                ]
-                .iter()
-                .map(|k| num(&total[*k]))
-                .collect::<Vec<_>>()
-                .join(",")
-            };
-            assert_eq!(got_total, f[8], "{}: total", f[0]);
+            for form in FORMS {
+                let reports: Vec<LcovInput> = inputs
+                    .split(',')
+                    .filter(|i| *i != "-")
+                    .map(|input| {
+                        let (file, name) = input.split_once('#').unwrap();
+                        let text = fragment(&dir, file, name).replace("{root}", form.sf_root);
+                        let place = Path::new(file).parent().unwrap().display();
+                        lcov_in(&format!("{}/{place}", form.root), &text)
+                    })
+                    .collect();
+                let files: Vec<FileInput> = f[3]
+                    .split(',')
+                    .filter(|k| *k != "-")
+                    .map(|key| match key.split_once('=') {
+                        None => file(key.as_bytes(), &std::fs::read(dir.join(key)).unwrap()),
+                        Some((k, "read")) => FileInput {
+                            path: k.as_bytes().to_vec(),
+                            content: Err(crate::git_tree::ReadError),
+                        },
+                        Some((k, "utf8")) => file(k.as_bytes(), b"\xff\xfe"),
+                        Some((k, "empty")) => file(k.as_bytes(), b""),
+                        Some(_) => panic!("{}: невідомий маркер {key}", f[0]),
+                    })
+                    .collect();
+                let report = build_with(
+                    form.rules,
+                    Origin::Directory,
+                    form.root.as_bytes(),
+                    files,
+                    &reports,
+                    tests_of(form.rules, f[4]),
+                );
+                let v = json_of(&report);
+                assert_eq!(report.complete, f[5] == "complete", "{}: complete", f[0]);
+                assert_eq!(v["complete"], report.complete, "{}", f[0]);
+                let got: Vec<String> = v["files"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| {
+                        let cols = [
+                            r["path"].as_str().unwrap().to_string(),
+                            r["inReport"].to_string(),
+                            num(&r["linesToCover"]),
+                            num(&r["uncoveredLines"]),
+                            num(&r["conditionsToCover"]),
+                            num(&r["uncoveredConditions"]),
+                            num(&r["lineCoverage"]),
+                            num(&r["branchCoverage"]),
+                            num(&r["coverage"]),
+                            cell(r["error"].as_str()),
+                        ];
+                        cols.join("|")
+                    })
+                    .collect();
+                assert_eq!(
+                    cell(Some(got.join(";")).filter(|g| !g.is_empty())),
+                    f[6],
+                    "{}: files",
+                    f[0]
+                );
+                let unresolved: Vec<&str> = v["unresolved"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|u| u["path"].as_str().unwrap())
+                    .collect();
+                assert_eq!(
+                    cell(Some(unresolved.join(",")).filter(|g| !g.is_empty())),
+                    f[7],
+                    "{}: unresolved",
+                    f[0]
+                );
+                let total = &v["total"];
+                let got_total = if total.is_null() {
+                    "-".to_string()
+                } else {
+                    [
+                        "linesToCover",
+                        "uncoveredLines",
+                        "conditionsToCover",
+                        "uncoveredConditions",
+                        "lineCoverage",
+                        "branchCoverage",
+                        "coverage",
+                    ]
+                    .iter()
+                    .map(|k| num(&total[*k]))
+                    .collect::<Vec<_>>()
+                    .join(",")
+                };
+                assert_eq!(got_total, f[8], "{}: total", f[0]);
+            }
             rows += 1;
         }
         assert_eq!(rows, 21);

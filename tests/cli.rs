@@ -1584,15 +1584,19 @@ fn coverage_lcov_resolves_from_cwd_and_report_dir() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(json_of(&out)["files"][0]["inReport"], true);
-    // Корінь-посилання розіменовується.
-    std::os::unix::fs::symlink("pkg", dir.join("link")).unwrap();
-    let out = local_run(
-        &dir,
-        &["coverage", "--path", "link", "--lcov", "pkg/reports/r.info"],
-        false,
-    );
-    assert_eq!(out.status.code(), Some(0));
-    assert_eq!(json_of(&out)["files"][0]["path"], "a.ts");
+    // Корінь, що є посиланням, розіменовується. Створення посилань на Windows потребує прав,
+    // тому цей підсценарій локально там не перевіряється.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("pkg", dir.join("link")).unwrap();
+        let out = local_run(
+            &dir,
+            &["coverage", "--path", "link", "--lcov", "pkg/reports/r.info"],
+            false,
+        );
+        assert_eq!(out.status.code(), Some(0));
+        assert_eq!(json_of(&out)["files"][0]["path"], "a.ts");
+    }
 }
 
 #[test]
