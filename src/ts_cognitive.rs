@@ -17,9 +17,11 @@
 
 use crate::ts_source::{ScoreError, with_program};
 use oxc_ast::ast::{
-    BreakStatement, CatchClause, ConditionalExpression, ContinueStatement, DoWhileStatement,
-    Expression, ForInStatement, ForOfStatement, ForStatement, IfStatement, LogicalExpression,
-    LogicalOperator, Statement, SwitchStatement, WhileStatement,
+    AccessorProperty, ArrowFunctionExpression, BreakStatement, CallExpression, CatchClause,
+    ConditionalExpression, ContinueStatement, DoWhileStatement, Expression, ForInStatement,
+    ForOfStatement, ForStatement, Function, IfStatement, LogicalExpression, LogicalOperator,
+    MethodDefinition, MethodDefinitionKind, PropertyDefinition, PropertyKey, Statement,
+    StaticBlock, SwitchStatement, WhileStatement,
 };
 use oxc_ast_visit::{Visit, walk};
 
@@ -30,6 +32,9 @@ pub fn score(path: &[u8], content: &[u8]) -> Result<u64, ScoreError> {
         let mut counter = Counter {
             total: 0,
             nesting: 0,
+            in_function: false,
+            name: None,
+            class_method: false,
         };
         counter.visit_program(program);
         counter.total
@@ -39,9 +44,59 @@ pub fn score(path: &[u8], content: &[u8]) -> Result<u64, ScoreError> {
 struct Counter {
     total: u64,
     nesting: u64,
+    /// Чи йде обхід у тілі функції (на відміну від коду поза функціями).
+    in_function: bool,
+    /// Власне ім'я найближчої функції для прямої рекурсії; стрілка його не має.
+    name: Option<String>,
+    /// Найближча функція — метод класу, тож `this.name()` теж є самовикликом.
+    class_method: bool,
 }
 
 impl Counter {
+    // Вкладена функція піднімає рівень лише всередині іншої функції чи конструкції, що
+    // вкладає; прямий ініціалізатор чи колбек на рівні модуля, а також метод класу
+    // (`top`), починають з нуля.
+    fn function<F: FnOnce(&mut Self)>(
+        &mut self,
+        name: Option<String>,
+        class_method: bool,
+        top: bool,
+        f: F,
+    ) {
+        let saved = (
+            self.nesting,
+            self.in_function,
+            self.name.take(),
+            self.class_method,
+        );
+        if top || !(self.in_function || self.nesting > 0) {
+            self.nesting = 0;
+        } else {
+            self.nesting += 1;
+        }
+        self.in_function = true;
+        self.name = name;
+        self.class_method = class_method;
+        f(self);
+        (self.nesting, self.in_function, self.name, self.class_method) = saved;
+    }
+
+    // Ініціалізатор поля й статичний блок — код поза функцією з нульовим рівнем,
+    // навіть у класі, оголошеному всередині функції.
+    fn member_code<F: FnOnce(&mut Self)>(&mut self, f: F) {
+        let saved = (
+            self.nesting,
+            self.in_function,
+            self.name.take(),
+            self.class_method,
+        );
+        self.nesting = 0;
+        self.in_function = false;
+        self.class_method = false;
+        f(self);
+        (self.nesting, self.in_function, self.name, self.class_method) = saved;
+    }
+
     /// `+1 + рівень` для конструкції, що вкладається.
     fn structural(&mut self) {
         self.total += 1 + self.nesting;
@@ -180,6 +235,79 @@ impl<'a> Visit<'a> for Counter {
 
     fn visit_logical_expression(&mut self, it: &LogicalExpression<'a>) {
         self.chain(it, &mut None);
+    }
+
+    fn visit_function(&mut self, it: &Function<'a>, flags: oxc_syntax::scope::ScopeFlags) {
+        let name = it.id.as_ref().map(|id| id.name.to_string());
+        self.function(name, false, false, |c| walk::walk_function(c, it, flags));
+    }
+
+    fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
+        self.function(None, false, false, |c| {
+            walk::walk_arrow_function_expression(c, it)
+        });
+    }
+
+    fn visit_method_definition(&mut self, it: &MethodDefinition<'a>) {
+        for decorator in &it.decorators {
+            self.visit_decorator(decorator);
+        }
+        self.visit_property_key(&it.key);
+        let name = match (&it.key, it.kind) {
+            (PropertyKey::StaticIdentifier(id), MethodDefinitionKind::Method) => {
+                Some(id.name.to_string())
+            }
+            _ => None,
+        };
+        let class_method = name.is_some();
+        self.function(name, class_method, true, |c| {
+            walk::walk_function(c, &it.value, oxc_syntax::scope::ScopeFlags::Function)
+        });
+    }
+
+    fn visit_property_definition(&mut self, it: &PropertyDefinition<'a>) {
+        for decorator in &it.decorators {
+            self.visit_decorator(decorator);
+        }
+        self.visit_property_key(&it.key);
+        if let Some(value) = &it.value {
+            self.member_code(|c| c.visit_expression(value));
+        }
+    }
+
+    fn visit_accessor_property(&mut self, it: &AccessorProperty<'a>) {
+        for decorator in &it.decorators {
+            self.visit_decorator(decorator);
+        }
+        self.visit_property_key(&it.key);
+        if let Some(value) = &it.value {
+            self.member_code(|c| c.visit_expression(value));
+        }
+    }
+
+    fn visit_static_block(&mut self, it: &StaticBlock<'a>) {
+        self.member_code(|c| walk::walk_static_block(c, it));
+    }
+
+    fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
+        if let Some(name) = &self.name {
+            let direct = match it.callee.without_parentheses() {
+                Expression::Identifier(id) => id.name == name.as_str(),
+                Expression::StaticMemberExpression(m) => {
+                    self.class_method
+                        && matches!(
+                            m.object.without_parentheses(),
+                            Expression::ThisExpression(_)
+                        )
+                        && m.property.name == name.as_str()
+                }
+                _ => false,
+            };
+            if direct {
+                self.total += 1;
+            }
+        }
+        walk::walk_call_expression(self, it);
     }
 }
 
@@ -366,6 +494,163 @@ mod tests {
     fn top_level_and_class_members_start_at_level_zero() {
         assert_eq!(s("namespace N { if (a) {} }"), 1);
         assert_eq!(s("class C { x = a ? 1 : 2; static { if (a) {} } }"), 2);
+    }
+
+    #[test]
+    fn arrow_in_callback_inside_function_is_nested() {
+        assert_eq!(s("function f() { arr.map(x => { if (x) {} }); }"), 2);
+    }
+
+    #[test]
+    fn module_level_arrow_and_callback_start_at_zero() {
+        assert_eq!(s("const f = () => { if (a) {} };"), 1);
+        assert_eq!(s("arr.map(x => { if (x) {} });"), 1);
+        assert_eq!(s("const g = function () { if (a) {} };"), 1);
+    }
+
+    #[test]
+    fn level_is_restored_after_function() {
+        assert_eq!(
+            s("function f() { g(() => { if (a) {} }); if (b) {} }"),
+            2 + 1
+        );
+        assert_eq!(s("if (a) { const h = () => {}; } if (b) {}"), 2);
+    }
+
+    #[test]
+    fn function_in_nesting_body_raises_level() {
+        assert_eq!(s("if (a) { const h = () => { if (b) {} }; }"), 1 + 3);
+    }
+
+    #[test]
+    fn object_literal_methods_and_accessors_are_nested_functions() {
+        assert_eq!(
+            s("function f() { return { m() { if (a) {} }, get g() { if (b) {} } }; }"),
+            2 + 2
+        );
+        assert_eq!(s("const o = { m() { if (a) {} } };"), 1);
+    }
+
+    #[test]
+    fn class_method_starts_at_zero_even_in_local_class() {
+        assert_eq!(s("class C { m() { if (a) {} } }"), 1);
+        assert_eq!(
+            s("function f() { if (a) { class C { m() { if (b) {} } } } }"),
+            1 + 1
+        );
+    }
+
+    #[test]
+    fn class_field_and_static_block_start_at_zero_even_in_local_class() {
+        assert_eq!(
+            s("function f() { if (a) { class C { x = b ? 1 : 2; static { if (c) {} } } } }"),
+            1 + 1 + 1
+        );
+    }
+
+    #[test]
+    fn callback_in_class_method_inherits_function_nesting() {
+        assert_eq!(s("class C { m() { arr.map(x => { if (x) {} }); } }"), 2);
+    }
+
+    #[test]
+    fn parameter_default_ternary_counts_in_function_context() {
+        assert_eq!(s("function f(x = a ? 1 : 2) {}"), 1);
+        assert_eq!(s("function f() { return (x = a ? 1 : 2) => x; }"), 2);
+    }
+
+    #[test]
+    fn direct_self_calls_count_per_call() {
+        assert_eq!(s("function f() { f(); f(); }"), 2);
+        assert_eq!(s("function f(n) { return n && f(n - 1); }"), 2);
+    }
+
+    #[test]
+    fn call_of_outer_function_from_nested_arrow_is_not_recursion() {
+        assert_eq!(s("function f() { arr.map(() => f()); }"), 0);
+    }
+
+    #[test]
+    fn this_call_is_recursion_only_for_class_method_with_same_name() {
+        assert_eq!(s("class C { m() { this.m(); m(); this.n(); } }"), 2);
+        assert_eq!(s("function m() { this.m(); }"), 0);
+    }
+
+    #[test]
+    fn indirect_recursion_is_outside_v1() {
+        assert_eq!(s("function a() { b(); } function b() { a(); }"), 0);
+        assert_eq!(s("const f = () => { f(); };"), 0);
+        assert_eq!(s("function f() { const g = f; g(); }"), 0);
+        assert_eq!(s("function f() { o.f(); }"), 0);
+    }
+
+    #[test]
+    fn async_and_generator_forms_keep_same_score() {
+        let body = "if (a) { for (const x of y) { if (x) {} } }";
+        let plain = s(&format!("function f() {{ {body} }}"));
+        assert_eq!(plain, 1 + 2 + 3);
+        assert_eq!(s(&format!("async function f() {{ {body} }}")), plain);
+        assert_eq!(s(&format!("function* f() {{ {body} }}")), plain);
+        assert_eq!(s(&format!("const f = async () => {{ {body} }};")), plain);
+    }
+
+    #[test]
+    fn whitepaper_sum_of_primes_is_seven() {
+        let src = "function sumOfPrimes(max: number): number {
+            let total = 0;
+            OUT: for (let i = 1; i <= max; ++i) {
+                for (let j = 2; j < i; ++j) {
+                    if (i % j === 0) {
+                        continue OUT;
+                    }
+                }
+                total += i;
+            }
+            return total;
+        }";
+        assert_eq!(s(src), 1 + 2 + 3 + 1);
+    }
+
+    #[test]
+    fn whitepaper_get_words_is_one() {
+        let src = "function getWords(number: number): string {
+            switch (number) {
+                case 1: return 'one';
+                case 2: return 'a couple';
+                case 3: return 'a few';
+                default: return 'lots';
+            }
+        }";
+        assert_eq!(s(src), 1);
+    }
+
+    #[test]
+    fn whitepaper_overridden_symbol_from_is_nineteen() {
+        let src =
+            "function overriddenSymbolFrom(classType: Type, name: string): Symbol | undefined {
+            if (classType.unknown) {
+                return undefined;
+            }
+            for (const candidate of classType.candidates) {
+                if (candidate.name === name && candidate.isMember) {
+                    if (candidate.canOverride) {
+                        const result = check(candidate);
+                        if (result.unknown) {
+                            return undefined;
+                        } else if (result.positive) {
+                            if (flag) {
+                                return candidate;
+                            }
+                        }
+                    }
+                }
+            }
+            if (flag) {
+                return undefined;
+            }
+            return undefined;
+        }";
+        assert_eq!(s(src), 1 + 1 + (2 + 1) + 3 + 4 + 5 + 1 + 1);
     }
 
     #[test]
