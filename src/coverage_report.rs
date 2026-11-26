@@ -375,6 +375,69 @@ pub fn build(
     Report { json, complete }
 }
 
+/// Читає запитані LCOV з диска; шлях відраховується від поточної теки процесу, тека звіту канонізується.
+fn read_reports(paths: &[&OsStr]) -> Result<Vec<LcovInput>, String> {
+    let cwd =
+        std::env::current_dir().map_err(|e| format!("не вдалося визначити поточну теку: {e}"))?;
+    paths
+        .iter()
+        .map(|p| {
+            let shown = p.to_string_lossy();
+            let full = cwd.join(p);
+            let bytes = std::fs::read(&full)
+                .map_err(|e| format!("не вдалося прочитати LCOV {shown}: {e}"))?;
+            let dir = full
+                .parent()
+                .and_then(|d| std::fs::canonicalize(d).ok())
+                .ok_or_else(|| format!("не вдалося визначити теку LCOV {shown}"))?;
+            Ok(LcovInput {
+                dir: os_bytes(dir.as_os_str()),
+                bytes,
+            })
+        })
+        .collect()
+}
+
+fn canonical_root(root: &std::path::Path) -> Result<Vec<u8>, String> {
+    std::fs::canonicalize(root)
+        .map(|p| os_bytes(p.as_os_str()))
+        .map_err(|e| format!("не вдалося визначити корінь {}: {e}", root.display()))
+}
+
+/// Звіт для коміту `rev`; `tests` — результат `parse_tests`. `Err` — фатальна відмова до публікації.
+pub fn measure(rev: &str, lcov: &[&OsStr], tests: Vec<Vec<u8>>) -> Result<Report, String> {
+    let (sha, files) = crate::complexity_report::git_inputs(rev)?;
+    let top = crate::git_tree::match_root()?;
+    let root = canonical_root(std::path::Path::new(&os_string(&top)))?;
+    let reports = read_reports(lcov)?;
+    Ok(build(Origin::Commit(&sha), &root, files, &reports, tests))
+}
+
+/// Звіт для локальної теки `path`; файл замість теки — фатальна помилка.
+pub fn measure_local(
+    path: &std::path::Path,
+    lcov: &[&OsStr],
+    tests: Vec<Vec<u8>>,
+) -> Result<Report, String> {
+    let (kind, files) = crate::complexity_report::local_inputs(path)?;
+    if kind != crate::local_tree::InputKind::Directory {
+        return Err(format!("--path має бути текою: {}", path.display()));
+    }
+    let root = canonical_root(path)?;
+    let reports = read_reports(lcov)?;
+    Ok(build(Origin::Directory, &root, files, &reports, tests))
+}
+
+#[cfg(unix)]
+fn os_string(bytes: &[u8]) -> std::ffi::OsString {
+    std::os::unix::ffi::OsStringExt::from_vec(bytes.to_vec())
+}
+
+#[cfg(not(unix))]
+fn os_string(bytes: &[u8]) -> std::ffi::OsString {
+    String::from_utf8_lossy(bytes).into_owned().into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

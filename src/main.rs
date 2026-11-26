@@ -1,14 +1,11 @@
 mod complexity_report;
-#[cfg(test)]
 mod coverage_report;
 mod duplication_report;
 mod empty_rust_test;
 mod git_tree;
-#[cfg(test)]
 mod lcov;
 mod local_tree;
 mod ts_cognitive;
-#[cfg(test)]
 mod ts_coverage;
 mod ts_cyclomatic;
 mod ts_duplication;
@@ -44,6 +41,13 @@ osavul — статичний аналізатор коду
   osavul duplication --path <файл-або-тека>
                       те саме для поточного вмісту на диску; Git не потрібен
 
+  osavul coverage <ревізія> --lcov <файл> [--lcov <файл>…] [--tests <шлях>…]
+                      покриття рядків і гілок у файлах .ts коміту з готових
+                      звітів LCOV (JSON у stdout, методика ts-coverage);
+                      тести не запускаються; потрібен локальний Git
+  osavul coverage --path <тека> --lcov <файл> [--lcov <файл>…] [--tests <шлях>…]
+                      те саме для поточного вмісту теки; Git не потрібен
+
 Опція --metric (лише в кінці виклику) обирає методику: cyclomatic (типово,
 ts-cyclomatic) cognitive (ts-cognitive) або loc (ts-loc, розмір коду: рядки з кодом без
 порожніх і коментарів); у записах файлів поле називається так само, як метрика.
@@ -53,6 +57,10 @@ ts-cyclomatic) cognitive (ts-cognitive) або loc (ts-loc, розмір код�
 Коди завершення duplication: 0 — повний звіт, 1 — неповний звіт (JSON у stdout;
 числа успішних файлів — нижня межа покриття), 2 — помилка аргументів, Git,
 коміту чи шляху (stdout порожній). Наявність дублів на код не впливає.
+Коди завершення coverage: 0 — повний звіт, 1 — неповний звіт (JSON у stdout),
+2 — помилка аргументів, Git, шляху чи читання LCOV (stdout порожній).
+--tests — шляхи від кореня (ревізії чи теки), що є тестами й не входять у
+покриття; низьке покриття на код не впливає.
 Коди завершення check: 0 — знахідок немає, 1 — є знахідки, 2 — помилка.
 ";
 
@@ -94,14 +102,70 @@ fn main() -> ExitCode {
             (Some(rev), Some(metric)) => emit(complexity_report::measure(rev, metric)),
             _ => usage_error(),
         },
-        [c, flag, path] if c == "duplication" && flag == "--path" => {
-            emit(duplication_report::measure_local(std::path::Path::new(path)))
-        }
+        [c, flag, path] if c == "duplication" && flag == "--path" => emit(
+            duplication_report::measure_local(std::path::Path::new(path)),
+        ),
         [c, rev] if c == "duplication" => match rev.to_str() {
             Some(rev) => emit(duplication_report::measure(rev)),
             None => usage_error(),
         },
+        [c, rest @ ..] if c == "coverage" => coverage(rest),
         _ => usage_error(),
+    }
+}
+
+/// Розбір `coverage`: селектор джерела, далі `--lcov` (один операнд за появу) і `--tests` (один або більше).
+fn coverage(args: &[OsString]) -> ExitCode {
+    let (path_mode, source, rest) = match args {
+        [flag, path, rest @ ..] if flag == "--path" => (true, path, rest),
+        [rev, rest @ ..] => (false, rev, rest),
+        [] => return usage_error(),
+    };
+    let mut lcov: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut tests: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut i = 0;
+    while i < rest.len() {
+        if rest[i] == "--lcov" {
+            match rest.get(i + 1) {
+                Some(v) => lcov.push(v),
+                None => return usage_error(),
+            }
+            i += 2;
+        } else if rest[i] == "--tests" {
+            let start = i + 1;
+            i = start;
+            while i < rest.len() && !rest[i].to_string_lossy().starts_with("--") {
+                tests.push(&rest[i]);
+                i += 1;
+            }
+            if i == start {
+                return usage_error();
+            }
+        } else {
+            return usage_error();
+        }
+    }
+    if lcov.is_empty() {
+        return usage_error();
+    }
+    let tests = match coverage_report::parse_tests(&tests) {
+        Ok(t) => t,
+        Err(reason) => {
+            let _ = writeln!(std::io::stderr(), "osavul: {reason}; див. `osavul --help`");
+            return ExitCode::from(2);
+        }
+    };
+    if path_mode {
+        emit(coverage_report::measure_local(
+            std::path::Path::new(source),
+            &lcov,
+            tests,
+        ))
+    } else {
+        match source.to_str() {
+            Some(rev) => emit(coverage_report::measure(rev, &lcov, tests)),
+            None => usage_error(),
+        }
     }
 }
 

@@ -43,6 +43,9 @@ fn help_is_stable_and_lists_all_invocations() {
     assert!(text.contains("osavul duplication <ревізія>"));
     assert!(text.contains("osavul duplication --path <файл-або-тека>"));
     assert!(text.contains("Коди завершення duplication"));
+    assert!(text.contains("osavul coverage <ревізія> --lcov <файл>"));
+    assert!(text.contains("osavul coverage --path <тека> --lcov <файл>"));
+    assert!(text.contains("Коди завершення coverage"));
     assert_eq!(first.stdout, second.stdout);
 }
 
@@ -1182,5 +1185,339 @@ fn duplication_single_operand_with_leading_dash_is_a_revision() {
     let out = repo.run(&repo.root, &["duplication", "--path"]);
     assert_eq!(out.status.code(), Some(2));
     assert!(out.stdout.is_empty());
-    assert!(!String::from_utf8(out.stderr).unwrap().contains("osavul --help"));
+    assert!(
+        !String::from_utf8(out.stderr)
+            .unwrap()
+            .contains("osavul --help")
+    );
+}
+
+const COV_SRC: &[u8] = b"function f(a: number) {\n  if (a) {\n    return 1;\n  }\n  return 2;\n}\n";
+
+fn cov_lcov(path: &str) -> String {
+    format!(
+        "SF:{path}\nDA:1,1\nDA:2,1\nDA:3,0\nDA:5,1\nBRDA:2,0,0,1\nBRDA:2,0,1,-\nend_of_record\n"
+    )
+}
+
+#[test]
+fn coverage_argument_errors_are_usage_errors() {
+    assert_usage_error(&["coverage"]);
+    assert_usage_error(&["coverage", "HEAD"]);
+    assert_usage_error(&["coverage", "--path", "."]);
+    assert_usage_error(&["coverage", "--path", ".", "--lcov"]);
+    assert_usage_error(&["coverage", "HEAD", "--lcov", "a", "--tests"]);
+    assert_usage_error(&["coverage", "HEAD", "--lcov", "a", "--tests", "--lcov", "b"]);
+    assert_usage_error(&["coverage", "HEAD", "--lcov", "a", "--bogus"]);
+    assert_usage_error(&["coverage", "HEAD", "--lcov", "a", "extra"]);
+    assert_usage_error(&["coverage", "--path", ".", "--lcov", "a", "--tests", "/abs"]);
+    assert_usage_error(&["coverage", "--path", ".", "--lcov", "a", "--tests", "../x"]);
+    let bad = std::ffi::OsStr::from_bytes(b"\xff");
+    let out = Command::new(env!("CARGO_BIN_EXE_osavul"))
+        .args(["coverage"])
+        .arg(bad)
+        .args(["--lcov", "a"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn coverage_local_directory_without_git_and_option_forms() {
+    let dir = local_dir("cov-local");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::create_dir_all(dir.join("test")).unwrap();
+    fs::write(dir.join("src/a.ts"), COV_SRC).unwrap();
+    fs::write(dir.join("test/t.ts"), COV_SRC).unwrap();
+    fs::create_dir_all(dir.join("reports")).unwrap();
+    // Відносний SF шукається від теки звіту, потім від кореня.
+    fs::write(dir.join("reports/one.info"), cov_lcov("src/a.ts")).unwrap();
+    fs::write(
+        dir.join("reports/two.info"),
+        "SF:test/t.ts\nDA:99,1\nend_of_record\n",
+    )
+    .unwrap();
+    let args = [
+        "coverage",
+        "--path",
+        ".",
+        "--tests",
+        "test",
+        "--lcov",
+        "reports/one.info",
+        "--lcov",
+        "reports/two.info",
+        "--tests",
+    ];
+    // Порожня група --tests — помилка аргументів.
+    assert_fatal(&local_run(&dir, &args, false));
+    let out = local_run(&dir, &args[..9], false);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stderr.is_empty());
+    let v = json_of(&out);
+    assert!(v["sha"].is_null());
+    assert_eq!(v["scope"]["input"], "directory");
+    assert_eq!(v["methodology"]["id"], "ts-coverage");
+    let files = v["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0]["path"], "src/a.ts");
+    assert_eq!(files[0]["inReport"], true);
+    assert_eq!(files[0]["linesToCover"], 4);
+    assert_eq!(files[0]["uncoveredLines"], 1);
+    assert_eq!(files[0]["conditionsToCover"], 2);
+    assert_eq!(files[0]["uncoveredConditions"], 1);
+    assert_eq!(v["total"]["coverage"], 66.7);
+    // Порядок опцій довільний, повтори --tests об'єднуються.
+    let reordered = local_run(
+        &dir,
+        &[
+            "coverage",
+            "--path",
+            ".",
+            "--lcov",
+            "reports/two.info",
+            "--tests",
+            "x",
+            "--lcov",
+            "reports/one.info",
+            "--tests",
+            "test",
+        ],
+        false,
+    );
+    assert_eq!(reordered.stdout, out.stdout);
+}
+
+#[test]
+fn coverage_zero_is_complete_and_defects_are_incomplete() {
+    let dir = local_dir("cov-codes");
+    fs::write(dir.join("a.ts"), COV_SRC).unwrap();
+    fs::write(dir.join("b.ts"), b"function (\n").unwrap();
+    fs::write(dir.join("zero.info"), "SF:a.ts\nDA:1,0\nend_of_record\n").unwrap();
+    let out = local_run(
+        &dir,
+        &[
+            "coverage",
+            "--path",
+            ".",
+            "--lcov",
+            "zero.info",
+            "--tests",
+            "b.ts",
+        ],
+        false,
+    );
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stderr.is_empty());
+    assert_eq!(json_of(&out)["total"]["coverage"], 0.0);
+
+    let out = local_run(
+        &dir,
+        &["coverage", "--path", ".", "--lcov", "zero.info"],
+        false,
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stderr.is_empty());
+    let v = json_of(&out);
+    assert_eq!(v["complete"], false);
+    assert!(v["total"].is_null());
+    assert_eq!(v["files"][1]["error"], "syntax-error");
+    assert_eq!(v["files"][0]["linesToCover"], 1);
+
+    // Відсутній LCOV після справного — фатальна помилка.
+    assert_fatal(&local_run(
+        &dir,
+        &[
+            "coverage",
+            "--path",
+            ".",
+            "--lcov",
+            "zero.info",
+            "--lcov",
+            "missing.info",
+        ],
+        false,
+    ));
+    // Файл на місці --path.
+    assert_fatal(&local_run(
+        &dir,
+        &["coverage", "--path", "a.ts", "--lcov", "zero.info"],
+        false,
+    ));
+    assert_fatal(&local_run(
+        &dir,
+        &["coverage", "--path", "none", "--lcov", "zero.info"],
+        false,
+    ));
+}
+
+#[test]
+fn coverage_lcov_resolves_from_cwd_and_report_dir() {
+    let dir = local_dir("cov-dirs");
+    fs::create_dir_all(dir.join("pkg/reports")).unwrap();
+    fs::write(dir.join("pkg/a.ts"), COV_SRC).unwrap();
+    fs::write(dir.join("pkg/reports/r.info"), cov_lcov("a.ts")).unwrap();
+    // Шлях LCOV — від поточної теки; SF — від теки звіту та її батьків.
+    let out = local_run(
+        &dir,
+        &["coverage", "--path", ".", "--lcov", "pkg/reports/r.info"],
+        false,
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(json_of(&out)["files"][0]["inReport"], true);
+    // Корінь-посилання розіменовується.
+    std::os::unix::fs::symlink("pkg", dir.join("link")).unwrap();
+    let out = local_run(
+        &dir,
+        &["coverage", "--path", "link", "--lcov", "pkg/reports/r.info"],
+        false,
+    );
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(json_of(&out)["files"][0]["path"], "a.ts");
+}
+
+#[test]
+fn coverage_unreadable_main_file_is_incomplete_with_good_neighbours() {
+    if is_root() {
+        return;
+    }
+    let dir = local_dir("cov-unreadable");
+    fs::write(dir.join("a.ts"), COV_SRC).unwrap();
+    fs::write(dir.join("b.ts"), COV_SRC).unwrap();
+    fs::write(dir.join("r.info"), cov_lcov("a.ts")).unwrap();
+    set_mode(&dir.join("b.ts"), 0o000);
+    let out = local_run(&dir, &["coverage", "--path", ".", "--lcov", "r.info"], true);
+    set_mode(&dir.join("b.ts"), 0o644);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stderr.is_empty());
+    let v = json_of(&out);
+    assert_eq!(v["files"][0]["linesToCover"], 4);
+    assert_eq!(v["files"][1]["error"], "read-error");
+}
+
+#[test]
+fn coverage_unreadable_lcov_is_fatal() {
+    if is_root() {
+        return;
+    }
+    let dir = local_dir("cov-lcov-denied");
+    fs::write(dir.join("a.ts"), COV_SRC).unwrap();
+    fs::write(dir.join("ok.info"), cov_lcov("a.ts")).unwrap();
+    fs::write(dir.join("no.info"), cov_lcov("a.ts")).unwrap();
+    set_mode(&dir.join("no.info"), 0o000);
+    let out = local_run(
+        &dir,
+        &[
+            "coverage", "--path", ".", "--lcov", "ok.info", "--lcov", "no.info",
+        ],
+        true,
+    );
+    set_mode(&dir.join("no.info"), 0o644);
+    assert_fatal(&out);
+}
+
+#[test]
+fn coverage_old_commit_from_subdirectory_with_absolute_sf() {
+    let repo = Repo::new("cov-commit");
+    repo.write("src/gone.ts", COV_SRC);
+    repo.write("src/deep/keep.ts", COV_SRC);
+    let old = repo.commit("one");
+    fs::remove_file(repo.root.join("src/gone.ts")).unwrap();
+    repo.write("src/deep/keep.ts", b"const changed = 1;\n");
+    repo.commit("two");
+
+    let reports = repo.home.join("outside");
+    fs::create_dir_all(&reports).unwrap();
+    let lcov = format!(
+        "{}{}",
+        cov_lcov(repo.root.join("src/gone.ts").to_str().unwrap()),
+        "SF:/elsewhere/x.js\nDA:999,1\nend_of_record\n"
+    );
+    fs::write(reports.join("r.info"), lcov).unwrap();
+    let cwd = repo.root.join("src/deep");
+    let out = repo.run(
+        &cwd,
+        &[
+            "coverage",
+            &old[..10],
+            "--lcov",
+            reports.join("r.info").to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.stderr.is_empty());
+    let v = json_of(&out);
+    assert_eq!(v["sha"], old.as_str());
+    assert_eq!(v["scope"]["input"], "git-tree");
+    assert_eq!(v["files"][0]["path"], "src/deep/keep.ts");
+    assert_eq!(v["files"][0]["inReport"], false);
+    assert_eq!(v["files"][1]["path"], "src/gone.ts");
+    assert_eq!(v["files"][1]["inReport"], true);
+    assert_eq!(v["files"][1]["linesToCover"], 4);
+
+    // Помилки ревізії й відсутність репозиторію — код 2.
+    let bad = repo.run(
+        &cwd,
+        &[
+            "coverage",
+            "nope",
+            "--lcov",
+            reports.join("r.info").to_str().unwrap(),
+        ],
+    );
+    assert_fatal(&bad);
+    let outside = repo.home.join("plain");
+    fs::create_dir_all(&outside).unwrap();
+    let bad = repo.run(
+        &outside,
+        &[
+            "coverage",
+            "HEAD",
+            "--lcov",
+            reports.join("r.info").to_str().unwrap(),
+        ],
+    );
+    assert_fatal(&bad);
+}
+
+#[test]
+fn coverage_bare_repository_resolves_sf_against_git_dir() {
+    let repo = Repo::new("cov-bare");
+    repo.write("a.ts", COV_SRC);
+    repo.commit("one");
+    let bare = repo.home.join("bare.git");
+    repo.git(&[
+        "clone",
+        "-q",
+        "--bare",
+        repo.root.to_str().unwrap(),
+        bare.to_str().unwrap(),
+    ]);
+    let canon = fs::canonicalize(&bare).unwrap();
+    let report = repo.home.join("bare.info");
+    fs::write(&report, cov_lcov(canon.join("a.ts").to_str().unwrap())).unwrap();
+    let out = repo.run(
+        &bare,
+        &["coverage", "HEAD", "--lcov", report.to_str().unwrap()],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = json_of(&out);
+    assert_eq!(v["files"][0]["inReport"], true);
+    assert_eq!(v["files"][0]["linesToCover"], 4);
 }
