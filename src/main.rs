@@ -4,6 +4,7 @@ mod git_tree;
 mod local_tree;
 mod ts_cognitive;
 mod ts_cyclomatic;
+mod ts_loc;
 mod ts_source;
 
 use std::env;
@@ -21,17 +22,17 @@ osavul — статичний аналізатор коду
   osavul --version    показати назву й версію
   osavul check <файл.rs>
                       знайти порожні Rust-тести (правило empty-rust-test)
-  osavul complexity <ревізія> [--metric <cyclomatic|cognitive>]
+  osavul complexity <ревізія> [--metric <cyclomatic|cognitive|loc>]
                       складність файлів .ts коміту (JSON у stdout);
                       вміст береться з коміту, потрібен локальний Git і запуск
                       усередині репозиторію
-  osavul complexity --path <файл-або-тека> [--metric <cyclomatic|cognitive>]
+  osavul complexity --path <файл-або-тека> [--metric <cyclomatic|cognitive|loc>]
                       те саме для поточного вмісту файла .ts або теки на диску
                       (зокрема незакомічених змін); Git не потрібен
 
 Опція --metric (лише в кінці виклику) обирає методику: cyclomatic (типово,
-ts-cyclomatic) або cognitive (ts-cognitive); у записах файлів поле називається
-так само, як метрика.
+ts-cyclomatic) cognitive (ts-cognitive) або loc (ts-loc, розмір коду: рядки з кодом без
+порожніх і коментарів); у записах файлів поле називається так само, як метрика.
 
 Коди завершення complexity: 0 — повний звіт, 1 — неповний звіт (JSON усе одно
 у stdout), 2 — помилка аргументів, Git, коміту, шляху чи обходу (stdout порожній).
@@ -87,6 +88,7 @@ fn parse_metric(opt: &OsString, value: &OsString) -> Option<Metric> {
     match value.to_str()? {
         "cyclomatic" => Some(Metric::Cyclomatic),
         "cognitive" => Some(Metric::Cognitive),
+        "loc" => Some(Metric::Loc),
         _ => None,
     }
 }
