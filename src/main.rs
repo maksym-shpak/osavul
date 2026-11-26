@@ -1,5 +1,4 @@
 mod complexity_report;
-#[allow(dead_code)] // команду підключає наступна частина
 mod duplication_report;
 mod empty_rust_test;
 mod git_tree;
@@ -33,12 +32,21 @@ osavul — статичний аналізатор коду
                       те саме для поточного вмісту файла .ts або теки на диску
                       (зокрема незакомічених змін); Git не потрібен
 
+  osavul duplication <ревізія>
+                      дублювання коду у файлах .ts коміту (JSON у stdout,
+                      методика ts-duplication); потрібен локальний Git
+  osavul duplication --path <файл-або-тека>
+                      те саме для поточного вмісту на диску; Git не потрібен
+
 Опція --metric (лише в кінці виклику) обирає методику: cyclomatic (типово,
 ts-cyclomatic) cognitive (ts-cognitive) або loc (ts-loc, розмір коду: рядки з кодом без
 порожніх і коментарів); у записах файлів поле називається так само, як метрика.
 
 Коди завершення complexity: 0 — повний звіт, 1 — неповний звіт (JSON усе одно
 у stdout), 2 — помилка аргументів, Git, коміту, шляху чи обходу (stdout порожній).
+Коди завершення duplication: 0 — повний звіт, 1 — неповний звіт (JSON у stdout;
+числа успішних файлів — нижня межа покриття), 2 — помилка аргументів, Git,
+коміту чи шляху (stdout порожній). Наявність дублів на код не впливає.
 Коди завершення check: 0 — знахідок немає, 1 — є знахідки, 2 — помилка.
 ";
 
@@ -79,6 +87,13 @@ fn main() -> ExitCode {
         {
             (Some(rev), Some(metric)) => emit(complexity_report::measure(rev, metric)),
             _ => usage_error(),
+        },
+        [c, flag, path] if c == "duplication" && flag == "--path" => {
+            emit(duplication_report::measure_local(std::path::Path::new(path)))
+        }
+        [c, rev] if c == "duplication" => match rev.to_str() {
+            Some(rev) => emit(duplication_report::measure(rev)),
+            None => usage_error(),
         },
         _ => usage_error(),
     }
