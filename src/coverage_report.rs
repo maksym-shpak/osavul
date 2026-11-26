@@ -14,7 +14,6 @@ use crate::ts_coverage;
 
 type Comps = Vec<Vec<u8>>;
 
-/// Хто володіє блоком `SF`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Owner {
     /// Індекс основного файла в інвентарі.

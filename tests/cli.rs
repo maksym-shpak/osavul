@@ -1251,7 +1251,6 @@ fn coverage_local_directory_without_git_and_option_forms() {
         "reports/two.info",
         "--tests",
     ];
-    // Порожня група --tests — помилка аргументів.
     assert_fatal(&local_run(&dir, &args, false));
     let out = local_run(&dir, &args[..9], false);
     assert_eq!(out.status.code(), Some(0));
@@ -1340,7 +1339,6 @@ fn coverage_zero_is_complete_and_defects_are_incomplete() {
         ],
         false,
     ));
-    // Файл на місці --path.
     assert_fatal(&local_run(
         &dir,
         &["coverage", "--path", "a.ts", "--lcov", "zero.info"],
@@ -1467,7 +1465,6 @@ fn coverage_old_commit_from_subdirectory_with_absolute_sf() {
     assert_eq!(v["files"][1]["inReport"], true);
     assert_eq!(v["files"][1]["linesToCover"], 4);
 
-    // Помилки ревізії й відсутність репозиторію — код 2.
     let bad = repo.run(
         &cwd,
         &[

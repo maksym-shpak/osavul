@@ -7,7 +7,6 @@ use oxc_ast::ast::*;
 use oxc_ast_visit::{Visit, walk};
 use std::collections::BTreeSet;
 
-/// Результат розбору файла.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Lines {
     /// Кількість фізичних рядків; допустимі номери LCOV — `1..=physical`.
@@ -118,7 +117,6 @@ mod tests {
         for src in cases {
             assert!(count(src) >= 1, "{src}");
         }
-        // Кожен вид на окремому рядку: перевіряємо точну кількість для кількох.
         assert_eq!(count("x();\nif (a) {}\ndebugger;\nthrow 1;\nvar v;"), 5);
         assert_eq!(count("switch (a) {\n}\ntry {\n} finally {\n}"), 2);
         assert_eq!(count("a: {\n  b: {\n  }\n}"), 2);
