@@ -1,4 +1,6 @@
 mod complexity_report;
+#[cfg(test)]
+mod coverage_report;
 mod duplication_report;
 mod empty_rust_test;
 mod git_tree;

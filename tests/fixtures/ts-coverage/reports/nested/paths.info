@@ -1,0 +1,56 @@
+#@ rel
+SF:src/main.ts
+DA:2,1
+end_of_record
+#@ dotdot
+SF:../../src/main.ts
+DA:2,1
+end_of_record
+#@ dots
+SF:./src/../src/./main.ts
+DA:2,1
+end_of_record
+#@ abs
+SF:{root}/src/main.ts
+DA:2,1
+end_of_record
+#@ abs-outside
+SF:/elsewhere/src/main.ts
+DA:2,1
+end_of_record
+#@ escape
+SF:../../../src/main.ts
+DA:2,1
+end_of_record
+#@ tests-file
+SF:tests/example.ts
+DA:1,1
+end_of_record
+#@ tests-sibling
+SF:testing/a.ts
+DA:1,1
+end_of_record
+#@ tests-dir-file
+SF:test/a.ts
+DA:1,1
+end_of_record
+#@ tests-missing
+SF:tests/gone.ts
+DA:x,1
+end_of_record
+#@ old-key
+SF:old/gone.ts
+DA:1,1
+end_of_record
+#@ suffix-only
+SF:main.ts
+DA:2,1
+end_of_record
+#@ missing
+SF:src/missing.ts
+DA:2,1
+end_of_record
+#@ other-suffix
+SF:src/main.js
+DA:x,1
+end_of_record
