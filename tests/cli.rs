@@ -430,6 +430,8 @@ fn make_writable(path: &Path) {
 #[cfg(not(unix))]
 fn make_writable(path: &Path) {
     let mut perm = fs::metadata(path).unwrap().permissions();
+    // На Windows атрибут readonly єдиний засіб захисту запису; Unix-семантики світового запису тут немає.
+    #[allow(clippy::permissions_set_readonly_false)]
     perm.set_readonly(false);
     fs::set_permissions(path, perm).unwrap();
 }
@@ -754,7 +756,10 @@ fn unknown_revision_outside_repository_and_missing_git_are_fatal() {
 
 /// URL локального транспорту: лише `file://` змушує Git справді фільтрувати об'єкти.
 fn file_url(path: &Path) -> String {
-    let p = path.display().to_string().replace('\\', "/");
+    let p = path.display().to_string();
+    // Роздільник замінюємо лише на Windows: у POSIX `\` є частиною імені.
+    #[cfg(windows)]
+    let p = p.replace('\\', "/");
     if p.starts_with('/') {
         format!("file://{p}")
     } else {
@@ -903,25 +908,29 @@ impl Drop for ReadDenied {
 fn local_run(dir: &Path, args: &[&str], restricted: bool) -> Output {
     let empty = dir.parent().unwrap().join("empty-path");
     fs::create_dir_all(&empty).unwrap();
-    let mut bin = PathBuf::from(env!("CARGO_BIN_EXE_osavul"));
+    let original = PathBuf::from(env!("CARGO_BIN_EXE_osavul"));
     #[cfg(unix)]
     let drop_root = restricted && is_root();
     #[cfg(not(unix))]
     let _ = restricted;
     #[cfg(unix)]
-    if drop_root {
+    let bin = if drop_root {
         // Бінарник теж може лежати під приватним каталогом: копіюємо в доступне місце.
         let copy = dir.parent().unwrap().join(format!(
             "osavul-bin-{}",
             dir.file_name().unwrap().to_string_lossy()
         ));
         if !copy.exists() {
-            fs::copy(&bin, &copy).unwrap();
+            fs::copy(&original, &copy).unwrap();
             set_mode(&copy, 0o755);
         }
         set_mode(&empty, 0o755);
-        bin = copy;
-    }
+        copy
+    } else {
+        original
+    };
+    #[cfg(not(unix))]
+    let bin = original;
     // Паралельний fork іншого тесту може на мить утримати відкритим дескриптор запису копії.
     for attempt in 0.. {
         let mut cmd = Command::new(&bin);
