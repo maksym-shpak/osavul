@@ -37,7 +37,7 @@ fn help_is_stable_and_lists_all_invocations() {
     assert!(text.contains("osavul complexity <ревізія>"));
     assert!(text.contains("osavul complexity --path <файл-або-тека>"));
     assert!(text.contains("Git не потрібен"));
-    assert!(text.contains("--metric <cyclomatic|cognitive>"));
+    assert!(text.matches("--metric <cyclomatic|cognitive|loc>").count() == 2);
     assert!(text.contains("Коди завершення complexity"));
     assert_eq!(first.stdout, second.stdout);
 }
@@ -932,6 +932,8 @@ fn metric_option_errors_are_usage_errors_before_source_access() {
         &["complexity", "HEAD", "--metric"][..],
         &["complexity", "HEAD", "--metric", "other"],
         &["complexity", "HEAD", "--metric", "Cognitive"],
+        &["complexity", "HEAD", "--metric", "Loc"],
+        &["complexity", "--path", "a.ts", "--metric", "Loc"],
         &[
             "complexity",
             "HEAD",
@@ -1000,6 +1002,16 @@ fn commit_metric_selects_methodology_and_score_key() {
     assert!(v["files"][0].get("cyclomatic").is_none());
     assert_eq!(v["total"], 1);
 
+    let out = repo.run(&repo.root, &["complexity", "HEAD", "--metric", "loc"]);
+    assert_eq!(out.status.code(), Some(0));
+    let v = json_of(&out);
+    assert_eq!(
+        v["methodology"],
+        serde_json::json!({"id": "ts-loc", "version": 1})
+    );
+    assert_eq!(v["files"][0]["loc"], 1);
+    assert_eq!(v["total"], 1);
+
     let implicit = repo.complexity("HEAD");
     let explicit = repo.run(
         &repo.root,
@@ -1030,6 +1042,20 @@ fn local_metric_selects_methodology_and_score_key() {
     );
     assert_eq!(v["files"][0]["cognitive"], 1);
     assert!(v["files"][0].get("cyclomatic").is_none());
+    assert_eq!(v["total"], 1);
+
+    let out = local_run(
+        &dir,
+        &["complexity", "--path", "a.ts", "--metric", "loc"],
+        false,
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let v = json_of(&out);
+    assert_eq!(
+        v["methodology"],
+        serde_json::json!({"id": "ts-loc", "version": 1})
+    );
+    assert_eq!(v["files"][0]["loc"], 1);
     assert_eq!(v["total"], 1);
 
     let implicit = local_run(&dir, &["complexity", "--path", "a.ts"], false);

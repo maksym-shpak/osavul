@@ -66,13 +66,14 @@ osavul check <файл.rs>
 toolchain 1.100.0: синтаксис перевіряє `rustc -Z parse-crate-root-only`.
 
 ```sh
-osavul complexity <ревізія> [--metric <cyclomatic|cognitive>]
+osavul complexity <ревізія> [--metric <cyclomatic|cognitive|loc>]
 ```
 
 Вимірює складність звичайних файлів `.ts` (разом із тестами й
 `.d.ts`) у дереві одного коміту за методикою `ts-cyclomatic` версії 1 (типово, `--metric cyclomatic`) або
 `ts-cognitive` версії 1 (`--metric cognitive`; у записах файлів поле
-`cognitive` замість `cyclomatic`) і друкує один компактний JSON у stdout. Потрібен локальний Git; команду можна запускати
+`cognitive` замість `cyclomatic`) або розмір коду за `ts-loc` версії 1 (`--metric loc`; поле `loc` —
+кількість рядків із кодом без порожніх і коментарів) і друкує один компактний JSON у stdout. Потрібен локальний Git; команду можна запускати
 з будь-якого підкаталогу репозиторію, вимір охоплює весь коміт. Індекс, робоче
 дерево й невідстежувані файли на результат не впливають. Коди завершення:
 `0` — повний звіт, `1` — неповний звіт (JSON усе одно у stdout, `total` — `null`),
@@ -81,7 +82,7 @@ stderr). Правила підрахунку й контракт звіту — 
 [Звіті складності](docs/domain/entities/complexity-report.md).
 
 ```sh
-osavul complexity --path <файл-або-тека> [--metric <cyclomatic|cognitive>]
+osavul complexity --path <файл-або-тека> [--metric <cyclomatic|cognitive|loc>]
 ```
 
 Той самий звіт для поточного вмісту на диску: вказаного файла `.ts` або всіх

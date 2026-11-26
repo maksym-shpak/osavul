@@ -1,0 +1,5 @@
+path	pair	loc
+comment-line.ts	comment	1
+punctuation-line.ts	comment	2
+template.ts	template	2
+template-with-blank.ts	template	3

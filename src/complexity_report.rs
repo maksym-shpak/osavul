@@ -6,6 +6,7 @@ use crate::git_tree::{self, ReadError};
 use crate::local_tree::{self, InputKind};
 use crate::ts_cognitive;
 use crate::ts_cyclomatic;
+use crate::ts_loc;
 
 /// Шлях і результат читання його вмісту.
 pub struct FileInput {
@@ -24,6 +25,7 @@ pub struct Report {
 pub enum Metric {
     Cyclomatic,
     Cognitive,
+    Loc,
 }
 
 impl Metric {
@@ -31,6 +33,7 @@ impl Metric {
         match self {
             Metric::Cyclomatic => "ts-cyclomatic",
             Metric::Cognitive => "ts-cognitive",
+            Metric::Loc => "ts-loc",
         }
     }
 
@@ -38,6 +41,7 @@ impl Metric {
         match self {
             Metric::Cyclomatic => ts_cyclomatic::score(path, content),
             Metric::Cognitive => ts_cognitive::score(path, content),
+            Metric::Loc => ts_loc::score(path, content),
         }
     }
 
@@ -45,6 +49,7 @@ impl Metric {
         match self {
             Metric::Cyclomatic => ScoreField::Cyclomatic { cyclomatic: score },
             Metric::Cognitive => ScoreField::Cognitive { cognitive: score },
+            Metric::Loc => ScoreField::Loc { loc: score },
         }
     }
 }
@@ -55,6 +60,7 @@ impl Metric {
 enum ScoreField {
     Cyclomatic { cyclomatic: Option<u64> },
     Cognitive { cognitive: Option<u64> },
+    Loc { loc: Option<u64> },
 }
 
 #[derive(Serialize)]
@@ -327,5 +333,39 @@ mod tests {
         assert_eq!(v["files"][0]["cognitive"], 1);
         assert!(v["files"][0].get("cyclomatic").is_none());
         assert_eq!(v["total"], 1);
+    }
+
+    #[test]
+    fn loc_error_keeps_explicit_null_between_path_bytes_and_error() {
+        let report = build(
+            Origin::Commit(SHA),
+            Metric::Loc,
+            vec![FileInput {
+                path: b"\xff.ts".to_vec(),
+                content: Err(ReadError),
+            }],
+        );
+        let text = String::from_utf8(report.json).unwrap();
+        assert!(text.contains("\"methodology\":{\"id\":\"ts-loc\",\"version\":1}"));
+        assert!(text.contains(
+            "\"files\":[{\"path\":null,\"pathBytes\":\"ff2e7473\",\"loc\":null,\"error\":\"read-error\"}]"
+        ));
+        assert!(text.contains("\"complete\":false"));
+        assert!(text.contains("\"total\":null"));
+    }
+
+    #[test]
+    fn loc_scores_use_loc_key_and_sum_with_zero() {
+        let report = build(
+            Origin::Commit(SHA),
+            Metric::Loc,
+            vec![file(b"a.ts", b"// c\n"), file(b"b.ts", b"let a;\nlet b;\n")],
+        );
+        let v = json(&report);
+        assert_eq!(v["files"][0]["loc"], 0);
+        assert_eq!(v["files"][1]["loc"], 2);
+        assert!(v["files"][1].get("cyclomatic").is_none());
+        assert_eq!(v["complete"], true);
+        assert_eq!(v["total"], 2);
     }
 }
