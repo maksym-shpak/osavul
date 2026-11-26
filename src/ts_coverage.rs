@@ -7,6 +7,7 @@ use oxc_ast::ast::*;
 use oxc_ast_visit::{Visit, walk};
 use std::collections::BTreeSet;
 
+/// Результат розбору основного файла.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Lines {
     /// Кількість фізичних рядків; допустимі номери LCOV — `1..=physical`.
@@ -15,7 +16,8 @@ pub struct Lines {
     pub statement_lines: u64,
 }
 
-/// Перевіряє файл спільним парсером. Шлях лише обирає режим `.d.ts`.
+/// Перевіряє файл спільним парсером. Шлях лише обирає режим `.d.ts`; помилки розбору дають
+/// `ScoreError`, а не часткові числа.
 pub fn analyze(path: &[u8], content: &[u8]) -> Result<Lines, ScoreError> {
     with_parsed(path, content, |text, program, _| {
         let starts = line_starts(text);
@@ -31,6 +33,7 @@ pub fn analyze(path: &[u8], content: &[u8]) -> Result<Lines, ScoreError> {
     })
 }
 
+/// Збирає індекси (з нуля) різних рядків, де починається вузол із переліку `counted!`.
 struct Starts<'s> {
     starts: &'s [usize],
     lines: BTreeSet<usize>,
@@ -42,6 +45,8 @@ impl Starts<'_> {
     }
 }
 
+/// Перелік вузлів, початок яких робить рядок виконуваним за правилами SonarJS; багаторядковий
+/// вузол рахується лише за рядком початку, а кілька початків в одному рядку — один раз.
 macro_rules! counted {
     ($($method:ident, $walk:ident, $ty:ident;)*) => {
         impl<'a> Visit<'a> for Starts<'_> {
@@ -164,7 +169,8 @@ mod tests {
         let src = b"declare const x: number;\ndeclare function f(): void;\n";
         let lines = analyze(b"a.d.ts", src).unwrap();
         assert_eq!(lines.statement_lines, 1);
-        // Ті самі байти як звичайний .ts — теж коректні; режим не змінює межу.
+        // `declare const` дає виконуваний рядок, `declare function` — ні; фізичні рядки рахуються
+        // як зазвичай.
         assert_eq!(lines.physical, 3);
     }
 

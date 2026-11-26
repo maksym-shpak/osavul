@@ -25,6 +25,7 @@ struct Branch {
     count: u64,
 }
 
+/// Результат розбору одного звіту.
 #[derive(Debug, Default)]
 pub struct Report {
     pub blocks: Vec<Block>,
@@ -32,20 +33,32 @@ pub struct Report {
     pub orphan: bool,
 }
 
+/// Дефект даних блоків; перевіряється в `check`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Defect {
+    /// Запис `DA` чи `BRDA` не розібрався за формою полів.
     InvalidRecord,
+    /// Номер рядка `DA` чи `BRDA` лежить поза `1..=max_line`.
     LineOutOfRange,
 }
 
+/// Чотири лічильники покриття одного файла після злиття блоків.
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
 pub struct Counts {
+    /// Різні рядки, згадані в `DA` чи `BRDA`.
     pub lines: u64,
+    /// Рядки із сумарним лічильником нуль (покрита умова рядка рахується як попадання).
     pub uncovered_lines: u64,
+    /// Умови (гілки) після злиття; ключ умови — ранг блока й ідентифікатор гілки в межах рядка.
     pub conditions: u64,
     pub uncovered_conditions: u64,
 }
 
+/// Розбирає один звіт; не повертає помилок.
+///
+/// Дефект запису лишається в блоці й виявляється в `check`. `DA` чи `BRDA` поза блоком `SF`
+/// лише ставлять `Report::orphan`. Блок закривається `end_of_record`, наступним `SF` або
+/// кінцем звіту; `\r` перед `\n` відкидається.
 pub fn parse(bytes: &[u8]) -> Report {
     let mut report = Report::default();
     let mut open: Option<Block> = None;
@@ -81,7 +94,8 @@ pub fn parse(bytes: &[u8]) -> Report {
     report
 }
 
-/// Операнди запису `tag:`; рядок із самим `tag` без двокрапки — запис без полів (порожній операнд).
+/// Операнди запису `tag:`; рядок із самим `tag` без двокрапки — запис без полів (порожній
+/// операнд).
 fn tagged<'a>(line: &'a [u8], tag: &[u8]) -> Option<&'a [u8]> {
     if line == tag {
         return Some(b"");
@@ -103,7 +117,8 @@ fn parse_count(field: &[u8]) -> Option<u64> {
     }))
 }
 
-/// Ціле зі знаком. Нерозбірне поле — `None`; число поза межами файла лишається цілим для перевірки меж.
+/// Ціле зі знаком. Нерозбірне поле — `None`; число поза межами файла лишається цілим для
+/// перевірки меж.
 fn parse_line(field: &[u8]) -> Option<i64> {
     let (negative, body) = match field.strip_prefix(b"-") {
         Some(body) => (true, body),
@@ -127,6 +142,7 @@ fn parse_brda(rest: &[u8]) -> Option<Branch> {
     if fields.len() != 4 || fields[1].is_empty() || fields[2].is_empty() {
         return None;
     }
+    // `-` у лічильнику гілки означає, що гілку не виконано, тобто нуль.
     let count = if fields[3] == b"-" {
         0
     } else {
@@ -140,7 +156,8 @@ fn parse_brda(rest: &[u8]) -> Option<Branch> {
     })
 }
 
-/// Ідентифікатори з самих цифр — за числовим значенням, рівні значення — за байтами; решта після них за байтами.
+/// Порядок ідентифікаторів блоків `BRDA`: спершу ті, що з самих цифр, за числовим значенням
+/// (рівні значення, як-от `10` і `010`, — за байтами), потім решта за байтами.
 fn cmp_block_id(a: &[u8], b: &[u8]) -> Ordering {
     fn significant(id: &[u8]) -> &[u8] {
         let skip = id.iter().take_while(|d| **d == b'0').count();
@@ -176,7 +193,11 @@ pub fn check(blocks: &[&Block], max_line: usize) -> Result<(), Defect> {
     Ok(())
 }
 
-/// Зливає всі блоки одного файла. `max_line` — число фізичних рядків файла.
+/// Зливає всі блоки одного файла в `Counts`. `max_line` — число фізичних рядків файла.
+///
+/// Спершу виконується `check`, тож дефект даних не дає часткового результату.
+/// Лічильники `DA` одного рядка підсумовуються між блоками. Умова рахується непокритою, лише
+/// якщо жоден блок її не попав і вона оголошена в кожному блоці, що має `BRDA` цього рядка.
 pub fn merge(blocks: &[&Block], max_line: usize) -> Result<Counts, Defect> {
     check(blocks, max_line)?;
     let mut line_counts: BTreeMap<i64, u64> = BTreeMap::new();
@@ -193,6 +214,8 @@ pub fn merge(blocks: &[&Block], max_line: usize) -> Result<Counts, Defect> {
             by_line.entry(record.line).or_default().push(record);
         }
         for (line, records) in by_line {
+            // Ідентифікатори блоків зіставляються між `SF` за рангом у межах рядка, а не за
+            // текстом (див. `ranks_are_local_to_line_and_block`).
             let mut ids: Vec<&[u8]> = records.iter().map(|r| r.block.as_slice()).collect();
             ids.sort_by(|a, b| cmp_block_id(a, b));
             ids.dedup();
@@ -228,6 +251,7 @@ pub fn merge(blocks: &[&Block], max_line: usize) -> Result<Counts, Defect> {
             }
         }
         counts.conditions += covered;
+        // Покрита умова робить рядок покритим, навіть якщо `DA` дає нуль.
         if let Some(total) = line_counts.get_mut(&line) {
             *total = total.saturating_add(covered);
         }
@@ -356,6 +380,7 @@ mod tests {
         }
     }
 
+    // Виявляє зміну пріоритету: нерозбірний запис не повинен поступатися помилці номера рядка.
     #[test]
     fn invalid_record_wins_over_range() {
         let text = "SF:a\nDA:0,1\nSF:a\nDA:1\nend_of_record\n";
@@ -370,6 +395,7 @@ mod tests {
         assert_eq!(merged(&[a, b], 2), Ok(counts(2, 0, 0, 0)));
     }
 
+    // Виявляє переповнення чи обнулення надвеликих лічильників: нуль і додатне не змішуються.
     #[test]
     fn huge_counts_keep_zero_vs_positive() {
         let big = "9".repeat(40);
@@ -393,7 +419,8 @@ mod tests {
 
     #[test]
     fn ranks_are_local_to_line_and_block() {
-        // Рядок 1: блок 5 → ранг 0 у кожному SF; рядок 2: блоки 7 і 3 мають ранги 1 і 0 незалежно від рядка 1.
+        // Рядок 1: блок 5 → ранг 0 у кожному SF; рядок 2: блоки 7 і 3 мають ранги 1 і 0
+        // незалежно від рядка 1.
         let a = "SF:a\nBRDA:1,5,0,1\nBRDA:2,7,0,0\nBRDA:2,3,0,1\nend_of_record\n";
         let b = "SF:a\nBRDA:1,9,0,0\nBRDA:2,1,0,0\nBRDA:2,8,0,1\nend_of_record\n";
         // Рядок 1: ключ (0,0) покритий у a. Рядок 2: (0,0) покритий у a, (1,0) покритий у b.
@@ -407,6 +434,7 @@ mod tests {
         assert_eq!(merged(&[text], 1), Ok(counts(1, 0, 2, 1)));
     }
 
+    // Виявляє хибний підрахунок непокритої умови, оголошеної лише в частині блоків рядка.
     #[test]
     fn zero_key_counts_only_when_declared_in_every_branch_block() {
         let a = "SF:a\nDA:1,1\nBRDA:1,0,0,1\nBRDA:1,0,1,0\nend_of_record\n";
@@ -465,7 +493,9 @@ mod tests {
             let f: Vec<&str> = row.split('\t').collect();
             assert_eq!(f.len(), 10, "{row}");
             if !f[2].contains('#') || f[2].starts_with(['@', '=']) {
-                continue; // сценарій без LCOV: перевіряє ts_coverage
+                // Рядок без фрагмента LCOV: джерельний файл перевіряє `ts_coverage`, а сценарії
+                // з префіксами `@` і `=` — тести `coverage_report`.
+                continue;
             }
             let reports: Vec<Report> = f[2]
                 .split(',')
