@@ -1,0 +1,74 @@
+#@ bad-da-fields
+SF:src/main.ts
+DA:2
+end_of_record
+#@ bad-da-line
+SF:src/main.ts
+DA:x,1
+end_of_record
+#@ bad-da-count
+SF:src/main.ts
+DA:2,x
+end_of_record
+#@ neg-count
+SF:src/main.ts
+DA:2,-1
+end_of_record
+#@ bad-brda-fields
+SF:src/main.ts
+BRDA:3,0,0
+end_of_record
+#@ bad-brda-count
+SF:src/main.ts
+BRDA:3,0,0,x
+end_of_record
+#@ empty-block-id
+SF:src/main.ts
+BRDA:3,,0,1
+end_of_record
+#@ empty-branch-id
+SF:src/main.ts
+BRDA:3,0,,1
+end_of_record
+#@ da-line-zero
+SF:src/main.ts
+DA:0,1
+end_of_record
+#@ da-line-negative
+SF:src/main.ts
+DA:-1,1
+end_of_record
+#@ da-line-over
+SF:src/main.ts
+DA:18,1
+end_of_record
+#@ da-line-last
+SF:src/main.ts
+DA:17,1
+end_of_record
+#@ brda-line-zero
+SF:src/main.ts
+BRDA:0,0,0,1
+end_of_record
+#@ brda-line-over
+SF:src/main.ts
+BRDA:18,0,0,1
+end_of_record
+#@ brda-line-last
+SF:src/main.ts
+BRDA:17,0,0,1
+end_of_record
+#@ invalid-and-range
+SF:src/main.ts
+DA:0,1
+DA:2
+end_of_record
+#@ stray-da
+DA:2,1
+#@ stray-brda
+BRDA:3,0,0,1
+#@ stray-after-end
+SF:src/main.ts
+DA:2,1
+end_of_record
+DA:3,1

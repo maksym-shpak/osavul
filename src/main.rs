@@ -2,6 +2,8 @@ mod complexity_report;
 mod duplication_report;
 mod empty_rust_test;
 mod git_tree;
+#[cfg(test)]
+mod lcov;
 mod local_tree;
 mod ts_cognitive;
 mod ts_cyclomatic;
