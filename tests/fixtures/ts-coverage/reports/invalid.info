@@ -63,6 +63,10 @@ SF:src/main.ts
 DA:0,1
 DA:2
 end_of_record
+#@ broken-record
+SF:src/broken.ts
+DA:x,1
+end_of_record
 #@ stray-da
 DA:2,1
 #@ stray-brda

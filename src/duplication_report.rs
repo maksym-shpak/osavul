@@ -85,7 +85,7 @@ struct Document<'a> {
 }
 
 /// Десяті частки відсотка з округленням точної половини вгору (ціла арифметика).
-fn density_tenths(duplicated: u64, lines: u64) -> u64 {
+pub(crate) fn density_tenths(duplicated: u64, lines: u64) -> u64 {
     let (d, l) = (u128::from(duplicated), u128::from(lines));
     ((2000 * d + l) / (2 * l)) as u64
 }

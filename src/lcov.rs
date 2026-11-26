@@ -452,7 +452,7 @@ mod tests {
         for row in table.lines().skip(1) {
             let f: Vec<&str> = row.split('\t').collect();
             assert_eq!(f.len(), 10, "{row}");
-            if !f[2].contains('#') || f[2].starts_with('@') {
+            if !f[2].contains('#') || f[2].starts_with(['@', '=']) {
                 continue; // сценарій без LCOV: перевіряє ts_coverage
             }
             let reports: Vec<Report> = f[2]

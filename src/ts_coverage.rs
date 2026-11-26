@@ -204,7 +204,7 @@ mod tests {
         let mut rows = 0;
         for row in table.lines().skip(1) {
             let f: Vec<&str> = row.split('\t').collect();
-            if f[2].contains('#') || f[2].starts_with('@') {
+            if f[2].contains('#') || f[2].starts_with(['@', '=']) {
                 continue;
             }
             let content = std::fs::read(dir.join(f[2])).unwrap();
