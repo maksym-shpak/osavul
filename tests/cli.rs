@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -39,6 +40,9 @@ fn help_is_stable_and_lists_all_invocations() {
     assert!(text.contains("Git не потрібен"));
     assert!(text.matches("--metric <cyclomatic|cognitive|loc>").count() == 2);
     assert!(text.contains("Коди завершення complexity"));
+    assert!(text.contains("osavul duplication <ревізія>"));
+    assert!(text.contains("osavul duplication --path <файл-або-тека>"));
+    assert!(text.contains("Коди завершення duplication"));
     assert_eq!(first.stdout, second.stdout);
 }
 
@@ -74,6 +78,23 @@ fn extra_argument_is_usage_error() {
 #[test]
 fn complexity_without_revision_is_usage_error() {
     assert_usage_error(&["complexity"]);
+}
+
+#[test]
+fn duplication_argument_forms_are_validated() {
+    assert_usage_error(&["duplication"]);
+    assert_usage_error(&["duplication", "HEAD", "--metric", "loc"]);
+    assert_usage_error(&["duplication", "--path", "a.ts", "extra"]);
+    assert_usage_error(&["duplication", "--path=a.ts", "a.ts"]);
+    assert_usage_error(&["duplication", "a.ts", "--path"]);
+    let bad = std::ffi::OsStr::from_bytes(b"\xff");
+    let out = Command::new(env!("CARGO_BIN_EXE_osavul"))
+        .arg("duplication")
+        .arg(bad)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
 }
 
 fn temp_file(name: &str, content: &[u8]) -> PathBuf {
@@ -1087,4 +1108,79 @@ fn cognitive_file_failure_gives_incomplete_report_with_exit_one() {
     assert!(v["files"][0]["cognitive"].is_null());
     assert_eq!(v["files"][0]["error"], "syntax-error");
     assert_eq!(v["files"][1]["cognitive"], 1);
+}
+
+const DUP_BLOCK: &str = "function f(a: number, b: number) {\n  const x = a + b;\n  const y = a - b;\n  const z = a * b;\n  const w = a / b;\n  const v = a % b;\n  const u = x + y + z;\n  const t = w + v + u;\n  const s = t + x + y;\n  const r = s + z + w;\n  const q = r * s * t + u * v * w + x * y * z;\n  const p = q - r - s - t - u - v - w - x - y - z;\n  const o = p + q + r + s + t + u + v + w + x + y + z;\n  return r + v + u + t + o + p + q;\n}\n";
+
+#[test]
+fn duplication_reports_cross_file_group_from_commit() {
+    let repo = Repo::new("dup-commit");
+    repo.write("a.ts", DUP_BLOCK.as_bytes());
+    repo.write("b.ts", DUP_BLOCK.as_bytes());
+    let sha = repo.commit("dup");
+    let out = repo.run(&repo.root, &["duplication", &sha]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stderr.is_empty());
+    let v = json_of(&out);
+    assert_eq!(v["sha"], sha.as_str());
+    assert_eq!(v["methodology"]["id"], "ts-duplication");
+    assert_eq!(v["scope"]["input"], "git-tree");
+    let groups = v["duplications"].as_array().unwrap();
+    assert_eq!(groups.len(), 1);
+    let blocks = groups[0]["blocks"].as_array().unwrap();
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0]["path"], "a.ts");
+    assert_eq!(blocks[1]["path"], "b.ts");
+    assert_eq!(v["total"]["duplicatedFiles"], 2);
+}
+
+#[test]
+fn duplication_local_file_and_directory_without_git() {
+    let dir = local_dir("dup-local");
+    fs::write(dir.join("a.ts"), DUP_BLOCK).unwrap();
+    fs::write(dir.join("b.ts"), DUP_BLOCK).unwrap();
+    let out = local_run(&dir, &["duplication", "--path", "."], false);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stderr.is_empty());
+    let v = json_of(&out);
+    assert!(v["sha"].is_null());
+    assert_eq!(v["scope"]["input"], "directory");
+    assert_eq!(v["duplications"].as_array().unwrap().len(), 1);
+    let out = local_run(&dir, &["duplication", "--path", "a.ts"], false);
+    assert_eq!(out.status.code(), Some(0));
+    let v = json_of(&out);
+    assert_eq!(v["scope"]["input"], "file");
+    assert!(v["duplications"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn duplication_incomplete_report_exits_one_and_fatal_exits_two() {
+    let dir = local_dir("dup-incomplete");
+    fs::write(dir.join("a.ts"), DUP_BLOCK).unwrap();
+    fs::write(dir.join("bad.ts"), "let = = ;\n").unwrap();
+    let out = local_run(&dir, &["duplication", "--path", "."], false);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stderr.is_empty());
+    let v = json_of(&out);
+    assert_eq!(v["complete"], false);
+    assert!(v["total"].is_null());
+    let out = local_run(&dir, &["duplication", "--path", "missing"], false);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    assert!(!out.stderr.is_empty());
+}
+
+#[test]
+fn duplication_single_operand_with_leading_dash_is_a_revision() {
+    let repo = Repo::new("dup-dash");
+    repo.write("a.ts", b"function a() {}\n");
+    let sha = repo.commit("one");
+    repo.git(&["update-ref", "refs/heads/-d", &sha]);
+    let out = repo.run(&repo.root, &["duplication", "-d"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(json_of(&out)["sha"], sha.as_str());
+    let out = repo.run(&repo.root, &["duplication", "--path"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    assert!(!String::from_utf8(out.stderr).unwrap().contains("osavul --help"));
 }

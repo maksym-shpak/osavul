@@ -1,0 +1,17 @@
+scenario	pair	inputs	groups	files	total
+tokens-99	tokens	tokens-99.ts	-	tokens-99.ts:24:0:0	24:0:0:0:0.0
+tokens-100	tokens	tokens-100.ts	tokens-100.ts:2-11 tokens-100.ts:13-22	tokens-100.ts:24:20:2	24:20:2:1:83.3
+rows-9	rows	rows-9.ts	-	rows-9.ts:22:0:0	22:0:0:0:0.0
+rows-10	rows	rows-10.ts	rows-10.ts:2-11 rows-10.ts:13-22	rows-10.ts:24:20:2	24:20:2:1:83.3
+literals	literal-identifier	literals.ts	literals.ts:2-11 literals.ts:13-22	literals.ts:24:20:2	24:20:2:1:83.3
+identifiers	literal-identifier	identifiers.ts	-	identifiers.ts:24:0:0	24:0:0:0:0.0
+imports	import	imports.ts	imports.ts:2-11 imports.ts:13-23	imports.ts:25:21:2	25:21:2:1:84.0
+reexports	import	reexports.ts	-	reexports.ts:25:0:0	25:0:0:0:0.0
+require-single	require	require-single.ts	require-single.ts:2-11 require-single.ts:13-23	require-single.ts:25:21:2	25:21:2:1:84.0
+require-multiple	require	require-multiple.ts	-	require-multiple.ts:25:0:0	25:0:0:0:0.0
+same-file	occurrences	same-file.ts	same-file.ts:2-11 same-file.ts:13-22	same-file.ts:24:20:2	24:20:2:1:83.3
+third	occurrences	same-file.ts,third.ts	same-file.ts:2-11 same-file.ts:13-22 third.ts:2-11	same-file.ts:24:20:2 third.ts:13:10:1	37:30:3:2:81.1
+contained	containment	contained-a.ts,contained-b.ts	contained-a.ts:2-22 contained-b.ts:2-22	contained-a.ts:24:21:1 contained-b.ts:24:21:1	48:42:2:2:87.5
+contained-extra	containment	contained-a.ts,contained-b.ts,contained-extra.ts	contained-a.ts:2-11 contained-a.ts:13-22 contained-b.ts:2-11 contained-b.ts:13-22 contained-extra.ts:2-11;contained-a.ts:2-22 contained-b.ts:2-22	contained-a.ts:24:21:3 contained-b.ts:24:21:3 contained-extra.ts:13:10:1	61:52:7:3:85.2
+repeated-lines	series	repeated-lines.ts	repeated-lines.ts:2-12 repeated-lines.ts:14-26	repeated-lines.ts:28:24:2	28:24:2:1:85.7
+repeated-lines-below	series	repeated-lines-below.ts	-	repeated-lines-below.ts:25:0:0	25:0:0:0:0.0

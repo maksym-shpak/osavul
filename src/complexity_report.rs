@@ -105,20 +105,62 @@ pub enum Origin<'a> {
     Directory,
 }
 
+impl Origin<'_> {
+    /// Значення полів `sha` і `scope.input`.
+    pub fn fields(&self) -> (Option<&str>, &'static str) {
+        match *self {
+            Origin::Commit(sha) => (Some(sha), "git-tree"),
+            Origin::File => (None, "file"),
+            Origin::Directory => (None, "directory"),
+        }
+    }
+}
+
+/// Пара полів `path` / `pathBytes`: рядок для UTF-8, інакше `null` і hex усіх байтів.
+pub fn path_fields(path: &[u8]) -> (Option<String>, Option<String>) {
+    match std::str::from_utf8(path) {
+        Ok(text) => (Some(text.to_string()), None),
+        Err(_) => (None, Some(hex(path))),
+    }
+}
+
+/// Розв'язує ревізію й повертає власний SHA та файли в порядку інвентарю.
+pub fn git_inputs(rev: &str) -> Result<(String, Vec<FileInput>), String> {
+    let inventory = git_tree::inventory(rev)?;
+    let contents = git_tree::read_contents(&inventory.entries);
+    let files = inventory
+        .entries
+        .into_iter()
+        .zip(contents)
+        .map(|(entry, content)| FileInput {
+            path: entry.path,
+            content,
+        })
+        .collect();
+    Ok((inventory.sha, files))
+}
+
+/// Збирає локальні файли разом із видом входу.
+pub fn local_inputs(path: &std::path::Path) -> Result<(InputKind, Vec<FileInput>), String> {
+    local_tree::collect(path)
+}
+
+impl From<InputKind> for Origin<'static> {
+    fn from(kind: InputKind) -> Self {
+        match kind {
+            InputKind::File => Origin::File,
+            InputKind::Directory => Origin::Directory,
+        }
+    }
+}
+
 /// Будує звіт із готових даних. Порядок `files` збігається з порядком входу.
 pub fn build(origin: Origin<'_>, metric: Metric, files: Vec<FileInput>) -> Report {
-    let (sha, input) = match origin {
-        Origin::Commit(sha) => (Some(sha), "git-tree"),
-        Origin::File => (None, "file"),
-        Origin::Directory => (None, "directory"),
-    };
+    let (sha, input) = origin.fields();
     let mut records = Vec::with_capacity(files.len());
     let mut total = Some(0u64);
     for file in files {
-        let (path, path_bytes) = match std::str::from_utf8(&file.path) {
-            Ok(text) => (Some(text.to_string()), None),
-            Err(_) => (None, Some(hex(&file.path))),
-        };
+        let (path, path_bytes) = path_fields(&file.path);
         let outcome = match &file.content {
             Ok(content) => metric.score(&file.path, content).map_err(|e| e.reason()),
             Err(e) => Err(e.reason()),
@@ -169,28 +211,14 @@ pub fn build(origin: Origin<'_>, metric: Metric, files: Vec<FileInput>) -> Repor
 
 /// Вимірює коміт `rev` у поточному Git-репозиторії. `Err` — фатальна відмова до отримання звіту.
 pub fn measure(rev: &str, metric: Metric) -> Result<Report, String> {
-    let inventory = git_tree::inventory(rev)?;
-    let contents = git_tree::read_contents(&inventory.entries);
-    let files = inventory
-        .entries
-        .into_iter()
-        .zip(contents)
-        .map(|(entry, content)| FileInput {
-            path: entry.path,
-            content,
-        })
-        .collect();
-    Ok(build(Origin::Commit(&inventory.sha), metric, files))
+    let (sha, files) = git_inputs(rev)?;
+    Ok(build(Origin::Commit(&sha), metric, files))
 }
 
 /// Вимірює поточний вміст локального файла або теки. `Err` — фатальна відмова обходу.
 pub fn measure_local(path: &std::path::Path, metric: Metric) -> Result<Report, String> {
-    let (kind, files) = local_tree::collect(path)?;
-    let origin = match kind {
-        InputKind::File => Origin::File,
-        InputKind::Directory => Origin::Directory,
-    };
-    Ok(build(origin, metric, files))
+    let (kind, files) = local_inputs(path)?;
+    Ok(build(kind.into(), metric, files))
 }
 
 fn hex(bytes: &[u8]) -> String {
