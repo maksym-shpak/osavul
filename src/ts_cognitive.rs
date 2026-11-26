@@ -26,7 +26,6 @@ use oxc_ast::ast::{
 use oxc_ast_visit::{Visit, walk};
 
 /// Бал файла за його шляхом (лише для вибору режиму `.d.ts`) і сирим вмістом.
-#[allow(dead_code)]
 pub fn score(path: &[u8], content: &[u8]) -> Result<u64, ScoreError> {
     with_program(path, content, |program| {
         let mut counter = Counter {

@@ -37,6 +37,7 @@ fn help_is_stable_and_lists_all_invocations() {
     assert!(text.contains("osavul complexity <ревізія>"));
     assert!(text.contains("osavul complexity --path <файл-або-тека>"));
     assert!(text.contains("Git не потрібен"));
+    assert!(text.contains("--metric <cyclomatic|cognitive>"));
     assert!(text.contains("Коди завершення complexity"));
     assert_eq!(first.stdout, second.stdout);
 }
@@ -921,4 +922,143 @@ fn local_unlistable_nested_directory_is_fatal_even_after_good_files() {
     let out = local_run(&dir, &["complexity", "--path", "."], true);
     set_mode(&sub, 0o755);
     assert_fatal(&out);
+}
+
+const ONE_IF: &str = "export function f(x: number) { if (x) { return 1; } }\n";
+
+#[test]
+fn metric_option_errors_are_usage_errors_before_source_access() {
+    for args in [
+        &["complexity", "HEAD", "--metric"][..],
+        &["complexity", "HEAD", "--metric", "other"],
+        &["complexity", "HEAD", "--metric", "Cognitive"],
+        &[
+            "complexity",
+            "HEAD",
+            "--metric",
+            "cognitive",
+            "--metric",
+            "cognitive",
+        ],
+        &["complexity", "HEAD", "--metric", "cognitive", "extra"],
+        &["complexity", "HEAD", "--metrics", "cognitive"],
+        &["complexity", "--path", "a.ts", "--metric"],
+        &["complexity", "--path", "a.ts", "--metric", "other"],
+        &[
+            "complexity",
+            "--path",
+            "a.ts",
+            "--metric",
+            "cognitive",
+            "extra",
+        ],
+    ] {
+        assert_usage_error(args);
+    }
+}
+
+#[test]
+fn metric_value_outside_utf8_is_usage_error() {
+    use std::os::unix::ffi::OsStrExt;
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
+    cmd.args(["complexity", "HEAD", "--metric"])
+        .arg(std::ffi::OsStr::from_bytes(b"cog\xffnitive"));
+    let out = cmd.output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    assert!(
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .contains("osavul --help")
+    );
+}
+
+#[test]
+fn bare_metric_operand_is_a_revision() {
+    let repo = Repo::new("metric-operand");
+    repo.write("a.ts", ONE_IF.as_bytes());
+    let sha = repo.commit("one");
+    repo.git(&["update-ref", "refs/heads/--metric", &sha]);
+    let out = repo.complexity("--metric");
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(json_of(&out)["sha"], sha.as_str());
+}
+
+#[test]
+fn commit_metric_selects_methodology_and_score_key() {
+    let repo = Repo::new("metric-commit");
+    repo.write("a.ts", ONE_IF.as_bytes());
+    repo.commit("one");
+    let out = repo.run(&repo.root, &["complexity", "HEAD", "--metric", "cognitive"]);
+    assert_eq!(out.status.code(), Some(0));
+    let v = json_of(&out);
+    assert_eq!(
+        v["methodology"],
+        serde_json::json!({"id": "ts-cognitive", "version": 1})
+    );
+    assert_eq!(v["files"][0]["cognitive"], 1);
+    assert!(v["files"][0].get("cyclomatic").is_none());
+    assert_eq!(v["total"], 1);
+
+    let implicit = repo.complexity("HEAD");
+    let explicit = repo.run(
+        &repo.root,
+        &["complexity", "HEAD", "--metric", "cyclomatic"],
+    );
+    assert_eq!(implicit.status.code(), Some(0));
+    assert_eq!(implicit.status.code(), explicit.status.code());
+    assert_eq!(implicit.stdout, explicit.stdout);
+    let v = json_of(&implicit);
+    assert_eq!(v["methodology"]["id"], "ts-cyclomatic");
+    assert_eq!(v["files"][0]["cyclomatic"], 2);
+}
+
+#[test]
+fn local_metric_selects_methodology_and_score_key() {
+    let dir = local_dir("metric");
+    fs::write(dir.join("a.ts"), ONE_IF).unwrap();
+    let out = local_run(
+        &dir,
+        &["complexity", "--path", "a.ts", "--metric", "cognitive"],
+        false,
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let v = json_of(&out);
+    assert_eq!(
+        v["methodology"],
+        serde_json::json!({"id": "ts-cognitive", "version": 1})
+    );
+    assert_eq!(v["files"][0]["cognitive"], 1);
+    assert!(v["files"][0].get("cyclomatic").is_none());
+    assert_eq!(v["total"], 1);
+
+    let implicit = local_run(&dir, &["complexity", "--path", "a.ts"], false);
+    let explicit = local_run(
+        &dir,
+        &["complexity", "--path", "a.ts", "--metric", "cyclomatic"],
+        false,
+    );
+    assert_eq!(implicit.status.code(), Some(0));
+    assert_eq!(implicit.status.code(), explicit.status.code());
+    assert_eq!(implicit.stdout, explicit.stdout);
+    assert_eq!(json_of(&implicit)["files"][0]["cyclomatic"], 2);
+}
+
+#[test]
+fn cognitive_file_failure_gives_incomplete_report_with_exit_one() {
+    let dir = local_dir("metric-fail");
+    fs::write(dir.join("a.ts"), b"function (").unwrap();
+    fs::write(dir.join("b.ts"), ONE_IF).unwrap();
+    let out = local_run(
+        &dir,
+        &["complexity", "--path", ".", "--metric", "cognitive"],
+        false,
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let v = json_of(&out);
+    assert_eq!(v["complete"], false);
+    assert!(v["total"].is_null());
+    assert!(v["files"][0]["cognitive"].is_null());
+    assert_eq!(v["files"][0]["error"], "syntax-error");
+    assert_eq!(v["files"][1]["cognitive"], 1);
 }
