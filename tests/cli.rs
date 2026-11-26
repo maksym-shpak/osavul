@@ -803,19 +803,30 @@ fn stdout_write_failure_is_fatal() {
     let repo = Repo::new("full");
     repo.write("a.ts", b"function a() {}\n");
     repo.commit("one");
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
-    cmd.args(["complexity", "HEAD"])
-        .current_dir(&repo.root)
-        .stdout(
-            fs::OpenOptions::new()
-                .write(true)
-                .open("/dev/full")
-                .unwrap(),
-        );
-    isolate(&mut cmd, &repo.home);
+    let run = || {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
+        cmd.args(["complexity", "HEAD"]).current_dir(&repo.root);
+        isolate(&mut cmd, &repo.home);
+        cmd
+    };
+    // Контроль: справний вхід дає непорожній звіт, тож відмова нижче стосується лише запису.
+    let ok = run().output().unwrap();
+    assert_eq!(ok.status.code(), Some(0));
+    assert!(!ok.stdout.is_empty());
+
+    // Читальний кінець закрито до старту процесу: запис у stdout завершується помилкою.
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let mut cmd = run();
+    cmd.stdout(writer);
     let out = cmd.output().unwrap();
     assert_eq!(out.status.code(), Some(2));
-    assert!(!out.stderr.is_empty());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let reason = stderr
+        .trim_end()
+        .strip_prefix("osavul: не вдалося записати звіт: ")
+        .unwrap_or_else(|| panic!("неочікувана діагностика: {stderr}"));
+    assert!(!reason.is_empty(), "порожня причина: {stderr}");
 }
 
 fn local_dir(name: &str) -> PathBuf {
