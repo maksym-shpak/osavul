@@ -722,52 +722,116 @@ fn stdout_write_failure_is_fatal() {
 fn local_dir(name: &str) -> PathBuf {
     // Від root дочірній процес з UID 65534 має пройти шлях до теки, а приватний
     // каталог checkout (0700) цього не дозволяє, тож фікстури лежать у /tmp.
-    let base = if is_root() {
+    #[cfg(unix)]
+    let root = is_root();
+    #[cfg(not(unix))]
+    let root = false;
+    let base = if root {
         PathBuf::from("/tmp").join(format!("osavul-local-{}", std::process::id()))
     } else {
         PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
     };
     fs::create_dir_all(&base).unwrap();
-    if is_root() {
+    #[cfg(unix)]
+    if root {
         set_mode(&base, 0o755);
     }
     let dir = base.join(format!("loc-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
+    #[cfg(unix)]
     set_mode(&dir, 0o755);
     dir
 }
 
+#[cfg(unix)]
 fn set_mode(path: &Path, mode: u32) {
-    std::os::unix::fs::PermissionsExt::set_mode(
-        &mut fs::metadata(path).unwrap().permissions(),
-        mode,
-    );
-    fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode)).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
 }
 
-/// Запуск без Git у PATH; `restricted` — непривілейований користувач, якщо тест іде від root.
+/// Забороняє читання файла, доки живе значення: на POSIX — правами 000, на Windows — утримуваним
+/// дескриптором без спільного доступу. Права відновлюються й у разі паніки тесту.
+struct ReadDenied {
+    #[cfg(unix)]
+    path: PathBuf,
+    #[cfg(windows)]
+    _handle: fs::File,
+}
+
+impl ReadDenied {
+    #[cfg(unix)]
+    fn new(path: &Path) -> Self {
+        set_mode(path, 0o000);
+        ReadDenied {
+            path: path.to_path_buf(),
+        }
+    }
+
+    #[cfg(windows)]
+    fn new(path: &Path) -> Self {
+        use std::os::windows::fs::OpenOptionsExt;
+        let handle = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path)
+            .unwrap();
+        ReadDenied { _handle: handle }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ReadDenied {
+    fn drop(&mut self) {
+        set_mode(&self.path, 0o644);
+    }
+}
+
+/// Запуск без Git у PATH; `restricted` — непривілейований користувач, якщо тест іде від root
+/// (інакше root обходить заборону читання). Копія бінарника унікальна для фікстури, бо спільна
+/// копія під час паралельних запусків дає `ExecutableFileBusy`.
 fn local_run(dir: &Path, args: &[&str], restricted: bool) -> Output {
     let empty = dir.parent().unwrap().join("empty-path");
     fs::create_dir_all(&empty).unwrap();
     let mut bin = PathBuf::from(env!("CARGO_BIN_EXE_osavul"));
-    if restricted && is_root() {
+    #[cfg(unix)]
+    let drop_root = restricted && is_root();
+    #[cfg(not(unix))]
+    let _ = restricted;
+    #[cfg(unix)]
+    if drop_root {
         // Бінарник теж може лежати під приватним каталогом: копіюємо в доступне місце.
-        let copy = dir.parent().unwrap().join("osavul-bin");
-        fs::copy(&bin, &copy).unwrap();
-        set_mode(&copy, 0o755);
+        let copy = dir.parent().unwrap().join(format!(
+            "osavul-bin-{}",
+            dir.file_name().unwrap().to_string_lossy()
+        ));
+        if !copy.exists() {
+            fs::copy(&bin, &copy).unwrap();
+            set_mode(&copy, 0o755);
+        }
         set_mode(&empty, 0o755);
         bin = copy;
     }
-    let mut cmd = Command::new(bin);
-    cmd.args(args).current_dir(dir).env("PATH", &empty);
-    if restricted && is_root() {
-        std::os::unix::process::CommandExt::uid(&mut cmd, 65534);
-        std::os::unix::process::CommandExt::gid(&mut cmd, 65534);
+    // Паралельний fork іншого тесту може на мить утримати відкритим дескриптор запису копії.
+    for attempt in 0.. {
+        let mut cmd = Command::new(&bin);
+        cmd.args(args).current_dir(dir).env("PATH", &empty);
+        #[cfg(unix)]
+        if drop_root {
+            std::os::unix::process::CommandExt::uid(&mut cmd, 65534);
+            std::os::unix::process::CommandExt::gid(&mut cmd, 65534);
+        }
+        match cmd.output() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 50 => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            r => return r.expect("не вдалося запустити osavul"),
+        }
     }
-    cmd.output().expect("не вдалося запустити osavul")
+    unreachable!()
 }
 
+#[cfg(unix)]
 fn is_root() -> bool {
     let out = Command::new("id").arg("-u").output().unwrap();
     String::from_utf8_lossy(&out.stdout).trim() == "0"
@@ -918,6 +982,7 @@ fn local_unreadable_file_keeps_record_and_scores_the_next_file() {
     fs::write(dir.join("a.ts"), b"function a() {}\n").unwrap();
     fs::write(dir.join("b.ts"), b"function b() {}\n").unwrap();
     fs::write(dir.join("c.ts"), b"function c() { if (1) {} }\n").unwrap();
+    #[cfg(unix)]
     for f in ["a.ts", "b.ts", "c.ts"] {
         set_mode(&dir.join(f), 0o644);
     }
@@ -928,7 +993,7 @@ fn local_unreadable_file_keeps_record_and_scores_the_next_file() {
         "{}",
         String::from_utf8_lossy(&control.stderr)
     );
-    set_mode(&dir.join("b.ts"), 0o000);
+    let _denied = ReadDenied::new(&dir.join("b.ts"));
     let out = local_run(&dir, &["complexity", "--path", "."], true);
     assert_eq!(out.status.code(), Some(1));
     let v = json_of(&out);
@@ -941,6 +1006,7 @@ fn local_unreadable_file_keeps_record_and_scores_the_next_file() {
     assert_eq!(v["complete"], false);
 }
 
+#[cfg(unix)]
 #[test]
 fn local_unlistable_nested_directory_is_fatal_even_after_good_files() {
     let dir = local_dir("unlistable");
@@ -962,6 +1028,11 @@ fn local_unlistable_nested_directory_is_fatal_even_after_good_files() {
     let out = local_run(&dir, &["complexity", "--path", "."], true);
     set_mode(&sub, 0o755);
     assert_fatal(&out);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("sub"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 const ONE_IF: &str = "export function f(x: number) { if (x) { return 1; } }\n";
@@ -1402,42 +1473,53 @@ fn coverage_lcov_resolves_from_cwd_and_report_dir() {
 
 #[test]
 fn coverage_unreadable_main_file_is_incomplete_with_good_neighbours() {
-    if is_root() {
-        return;
-    }
     let dir = local_dir("cov-unreadable");
     fs::write(dir.join("a.ts"), COV_SRC).unwrap();
     fs::write(dir.join("b.ts"), COV_SRC).unwrap();
     fs::write(dir.join("r.info"), cov_lcov("a.ts")).unwrap();
-    set_mode(&dir.join("b.ts"), 0o000);
-    let out = local_run(&dir, &["coverage", "--path", ".", "--lcov", "r.info"], true);
-    set_mode(&dir.join("b.ts"), 0o644);
+    #[cfg(unix)]
+    for f in ["a.ts", "b.ts", "r.info"] {
+        set_mode(&dir.join(f), 0o644);
+    }
+    let args = ["coverage", "--path", ".", "--lcov", "r.info"];
+    let control = local_run(&dir, &args, true);
+    assert_eq!(
+        control.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&control.stderr)
+    );
+    assert!(json_of(&control)["files"][1]["error"].is_null());
+    let _denied = ReadDenied::new(&dir.join("b.ts"));
+    let out = local_run(&dir, &args, true);
     assert_eq!(out.status.code(), Some(1));
     assert!(out.stderr.is_empty());
     let v = json_of(&out);
     assert_eq!(v["files"][0]["linesToCover"], 4);
+    assert_eq!(v["files"][1]["path"], "b.ts");
     assert_eq!(v["files"][1]["error"], "read-error");
 }
 
 #[test]
 fn coverage_unreadable_lcov_is_fatal() {
-    if is_root() {
-        return;
-    }
     let dir = local_dir("cov-lcov-denied");
     fs::write(dir.join("a.ts"), COV_SRC).unwrap();
     fs::write(dir.join("ok.info"), cov_lcov("a.ts")).unwrap();
     fs::write(dir.join("no.info"), cov_lcov("a.ts")).unwrap();
-    set_mode(&dir.join("no.info"), 0o000);
-    let out = local_run(
-        &dir,
-        &[
-            "coverage", "--path", ".", "--lcov", "ok.info", "--lcov", "no.info",
-        ],
-        true,
-    );
-    set_mode(&dir.join("no.info"), 0o644);
+    #[cfg(unix)]
+    for f in ["a.ts", "ok.info", "no.info"] {
+        set_mode(&dir.join(f), 0o644);
+    }
+    let args = [
+        "coverage", "--path", ".", "--lcov", "ok.info", "--lcov", "no.info",
+    ];
+    let control = local_run(&dir, &args, true);
+    assert_ne!(control.status.code(), Some(2));
+    let _denied = ReadDenied::new(&dir.join("no.info"));
+    let out = local_run(&dir, &args, true);
     assert_fatal(&out);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("LCOV") && err.contains("no.info"), "{err}");
 }
 
 #[test]
