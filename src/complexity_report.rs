@@ -80,11 +80,21 @@ pub fn build(origin: Origin<'_>, files: Vec<FileInput>) -> Report {
         match outcome {
             Ok(score) => {
                 total = total.map(|t| t + score);
-                records.push(FileRecord { path, path_bytes, cyclomatic: Some(score), error: None });
+                records.push(FileRecord {
+                    path,
+                    path_bytes,
+                    cyclomatic: Some(score),
+                    error: None,
+                });
             }
             Err(reason) => {
                 total = None;
-                records.push(FileRecord { path, path_bytes, cyclomatic: None, error: Some(reason) });
+                records.push(FileRecord {
+                    path,
+                    path_bytes,
+                    cyclomatic: None,
+                    error: Some(reason),
+                });
             }
         }
     }
@@ -92,13 +102,21 @@ pub fn build(origin: Origin<'_>, files: Vec<FileInput>) -> Report {
     let doc = Document {
         sha,
         source: "osavul",
-        methodology: Methodology { id: "ts-cyclomatic", version: 1 },
-        scope: Scope { input, entries: "regular-files", suffix: ".ts" },
+        methodology: Methodology {
+            id: "ts-cyclomatic",
+            version: 1,
+        },
+        scope: Scope {
+            input,
+            entries: "regular-files",
+            suffix: ".ts",
+        },
         complete,
         files: records,
         total,
     };
-    let mut json = serde_json::to_vec(&doc).expect("серіалізація звіту не може завершитись помилкою");
+    let mut json =
+        serde_json::to_vec(&doc).expect("серіалізація звіту не може завершитись помилкою");
     json.push(b'\n');
     Report { json, complete }
 }
@@ -111,7 +129,10 @@ pub fn measure(rev: &str) -> Result<Report, String> {
         .entries
         .into_iter()
         .zip(contents)
-        .map(|(entry, content)| FileInput { path: entry.path, content })
+        .map(|(entry, content)| FileInput {
+            path: entry.path,
+            content,
+        })
         .collect();
     Ok(build(Origin::Commit(&inventory.sha), files))
 }
@@ -137,7 +158,10 @@ mod tests {
     const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 
     fn file(path: &[u8], content: &[u8]) -> FileInput {
-        FileInput { path: path.to_vec(), content: Ok(content.to_vec()) }
+        FileInput {
+            path: path.to_vec(),
+            content: Ok(content.to_vec()),
+        }
     }
 
     fn json(report: &Report) -> serde_json::Value {
@@ -160,7 +184,10 @@ mod tests {
     fn complete_report_keeps_zeros_and_sums_all() {
         let report = build(
             Origin::Commit(SHA),
-            vec![file(b"a.ts", b"const x = 1;"), file(b"b.ts", b"function f() { if (a) {} }")],
+            vec![
+                file(b"a.ts", b"const x = 1;"),
+                file(b"b.ts", b"function f() { if (a) {} }"),
+            ],
         );
         let v = json(&report);
         assert!(report.complete);
@@ -175,7 +202,10 @@ mod tests {
             Origin::Commit(SHA),
             vec![
                 file(b"a.ts", b"function f() {}"),
-                FileInput { path: b"b.ts".to_vec(), content: Err(ReadError) },
+                FileInput {
+                    path: b"b.ts".to_vec(),
+                    content: Err(ReadError),
+                },
             ],
         );
         let v = json(&report);
@@ -200,9 +230,14 @@ mod tests {
 
     #[test]
     fn non_utf8_path_uses_path_bytes_after_null_path() {
-        let report = build(Origin::Commit(SHA), vec![file(b"\xff/\xfe.ts", b"function f() {}")]);
+        let report = build(
+            Origin::Commit(SHA),
+            vec![file(b"\xff/\xfe.ts", b"function f() {}")],
+        );
         let text = String::from_utf8(report.json.clone()).unwrap();
-        assert!(text.contains("\"files\":[{\"path\":null,\"pathBytes\":\"ff2ffe2e7473\",\"cyclomatic\":1}]"));
+        assert!(text.contains(
+            "\"files\":[{\"path\":null,\"pathBytes\":\"ff2ffe2e7473\",\"cyclomatic\":1}]"
+        ));
         assert!(report.complete);
     }
 

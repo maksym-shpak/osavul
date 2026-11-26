@@ -30,7 +30,8 @@ pub struct Inventory {
 fn git() -> Command {
     let mut cmd = Command::new("git");
     // Підміна об'єктів (refs/replace) не повинна змінювати виміряний коміт.
-    cmd.arg("--no-replace-objects").env("GIT_NO_REPLACE_OBJECTS", "1");
+    cmd.arg("--no-replace-objects")
+        .env("GIT_NO_REPLACE_OBJECTS", "1");
     // У частковому клоні відсутній об'єкт має бути помилкою читання, а не мережевим довантаженням.
     cmd.env("GIT_NO_LAZY_FETCH", "1");
     cmd
@@ -67,7 +68,13 @@ pub fn inventory(rev: &str) -> Result<Inventory, String> {
 fn resolve_commit(rev: &str) -> Result<String, String> {
     let fail = |msg: &str| format!("не вдалося розв'язати коміт {rev}: {msg}");
     let out = git()
-        .args(["-c", "core.warnAmbiguousRefs=true", "rev-parse", "--verify", "--end-of-options"])
+        .args([
+            "-c",
+            "core.warnAmbiguousRefs=true",
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+        ])
         .arg(rev)
         .stdin(Stdio::null())
         .output()
@@ -191,11 +198,19 @@ fn read_one(
     }
     let size: usize = parts.next()?.parse().ok()?;
     let mut content = Vec::new();
-    reader.by_ref().take(size as u64).read_to_end(&mut content).ok()?;
+    reader
+        .by_ref()
+        .take(size as u64)
+        .read_to_end(&mut content)
+        .ok()?;
     let mut lf = [0u8; 1];
     reader.read_exact(&mut lf).ok()?;
     if content.len() != size || lf[0] != b'\n' {
         return None;
     }
-    Some(if kind == "blob" { Ok(content) } else { Err(ReadError) })
+    Some(if kind == "blob" {
+        Ok(content)
+    } else {
+        Err(ReadError)
+    })
 }

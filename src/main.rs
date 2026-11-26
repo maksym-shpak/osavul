@@ -1,5 +1,5 @@
-mod empty_rust_test;
 mod complexity_report;
+mod empty_rust_test;
 mod git_tree;
 mod local_tree;
 mod ts_cyclomatic;
@@ -78,7 +78,9 @@ fn emit(result: Result<complexity_report::Report, String>) -> ExitCode {
 fn check(path: &str) -> ExitCode {
     let result = std::fs::read_to_string(path)
         .map_err(|e| format!("не вдалося прочитати {path}: {e}"))
-        .and_then(|text| empty_rust_test::find_empty_tests(&text).map_err(|e| format!("{path}: {e}")));
+        .and_then(|text| {
+            empty_rust_test::find_empty_tests(&text).map_err(|e| format!("{path}: {e}"))
+        });
     match result {
         Ok(lines) => {
             let mut report = String::new();

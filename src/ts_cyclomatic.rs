@@ -129,8 +129,14 @@ mod tests {
     #[test]
     fn acceptance_examples() {
         assert_eq!(ts("function f() { return 1; }"), 1);
-        assert_eq!(ts("function f(a) { if (a) { return 1; } else { return 2; } }"), 2);
-        assert_eq!(ts("function f(a, b) { if (a && b) { return 1; } return 2; }"), 3);
+        assert_eq!(
+            ts("function f(a) { if (a) { return 1; } else { return 2; } }"),
+            2
+        );
+        assert_eq!(
+            ts("function f(a, b) { if (a && b) { return 1; } return 2; }"),
+            3
+        );
         assert_eq!(score(b"a.d.ts", b"declare function f(): void;"), Ok(0));
         assert_eq!(ts("const x = a ? 1 : 2;"), 1);
         assert_eq!(ts("switch (a) { case 1: break; default: break; }"), 2);
@@ -148,7 +154,9 @@ mod tests {
         assert_eq!(ts("const f = function () {};"), 1);
         assert_eq!(ts("const f = () => 1; const g = () => { return 1; };"), 2);
         assert_eq!(
-            ts("class A { constructor() {} m() {} get x() { return 1; } set x(v) {} static s() {} }"),
+            ts(
+                "class A { constructor() {} m() {} get x() { return 1; } set x(v) {} static s() {} }"
+            ),
             5
         );
         assert_eq!(ts("const o = { m() {}, get x() { return 1; } };"), 2);
@@ -159,7 +167,10 @@ mod tests {
         assert_eq!(ts("function f(): void; function f(a?: number) {}"), 1);
         assert_eq!(ts("abstract class A { abstract m(): void; n(): void; }"), 0);
         assert_eq!(ts("class A { m(): void; m(a?: number) {} }"), 1);
-        assert_eq!(ts("declare function f(): void; interface I { m(): void; }"), 0);
+        assert_eq!(
+            ts("declare function f(): void; interface I { m(): void; }"),
+            0
+        );
         assert_eq!(ts("declare class A { m(): void; }"), 0);
     }
 
@@ -187,7 +198,10 @@ mod tests {
     #[test]
     fn type_level_syntax_is_not_executable() {
         assert_eq!(ts("type T<A> = A extends string ? 1 : 2;"), 0);
-        assert_eq!(ts("type U = (a: number) => void; interface I { f: () => void }"), 0);
+        assert_eq!(
+            ts("type U = (a: number) => void; interface I { f: () => void }"),
+            0
+        );
         assert_eq!(ts("function f(a = b ? 1 : 2) {}"), 2);
     }
 
@@ -201,7 +215,10 @@ mod tests {
 
     #[test]
     fn nested_executable_expressions_are_counted() {
-        assert_eq!(ts("function f(a) { return a ? (b ? 1 : 2) : g(c || d); }"), 4);
+        assert_eq!(
+            ts("function f(a) { return a ? (b ? 1 : 2) : g(c || d); }"),
+            4
+        );
     }
 
     #[test]
@@ -229,20 +246,35 @@ mod tests {
     #[test]
     fn recovered_tree_with_diagnostics_is_an_error() {
         // Парсер відновлюється після цієї помилки й будує дерево.
-        assert_eq!(score(b"a.ts", b"let x = 1; let x = 2; if (a) {} const;"), Err(ScoreError::Syntax));
-        assert_eq!(score(b"a.ts", b"class A { constructor() {} constructor() {} } function f( {"), Err(ScoreError::Syntax));
+        assert_eq!(
+            score(b"a.ts", b"let x = 1; let x = 2; if (a) {} const;"),
+            Err(ScoreError::Syntax)
+        );
+        assert_eq!(
+            score(
+                b"a.ts",
+                b"class A { constructor() {} constructor() {} } function f( {"
+            ),
+            Err(ScoreError::Syntax)
+        );
     }
 
     #[test]
     fn corpus_matches_expected_tsv() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ts-cyclomatic");
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ts-cyclomatic");
         let table = std::fs::read_to_string(dir.join("expected.tsv")).unwrap();
         let mut rows = 0;
         for line in table.lines().skip(1) {
             let cols: Vec<&str> = line.split('\t').collect();
             let content = std::fs::read(dir.join(cols[0])).unwrap();
             let expected: u64 = cols[2].parse().unwrap();
-            assert_eq!(score(cols[0].as_bytes(), &content), Ok(expected), "{}", cols[0]);
+            assert_eq!(
+                score(cols[0].as_bytes(), &content),
+                Ok(expected),
+                "{}",
+                cols[0]
+            );
             rows += 1;
         }
         assert_eq!(rows, 2);
