@@ -175,6 +175,7 @@ fn listing(args: &[&str], what: &str) -> Result<Vec<u8>, String> {
     // `--full-name` і `:/` дають шляхи від кореня дерева незалежно від місця запуску.
     // Спостерігач файлової системи з конфігурації репозиторію може виконувати довільний скрипт.
     let out = git()
+        .env_remove("GIT_LITERAL_PATHSPECS")
         .args(["-c", "core.fsmonitor=false"])
         .args(args)
         .stdin(Stdio::null())

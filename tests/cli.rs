@@ -2598,6 +2598,15 @@ fn gate_path_uses_disk_bytes_git_listing_and_argument_prefix() {
     // Завершальний роздільник аргументу не дублюється.
     let slash = gate_path(&repo, &repo.root, &base, "./");
     assert_eq!(slash.stdout, out.stdout);
+    // Буквальні pathspec Git не повинні спорожнювати перелік службового `:/`.
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
+    cmd.args(["gate", &base, "--path", "."])
+        .current_dir(&repo.root)
+        .env("GIT_LITERAL_PATHSPECS", "1");
+    isolate(&mut cmd, &repo.home);
+    let literal = cmd.output().unwrap();
+    assert_eq!(literal.status.code(), Some(1));
+    assert_eq!(literal.stdout, out.stdout);
 }
 
 #[test]
