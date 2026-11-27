@@ -74,12 +74,12 @@ impl Policy {
 const EXCLUDED: [&str; 2] = [".git", "node_modules"];
 
 #[cfg(unix)]
-fn os_bytes(s: &std::ffi::OsStr) -> Vec<u8> {
+pub fn os_bytes(s: &std::ffi::OsStr) -> Vec<u8> {
     std::os::unix::ffi::OsStrExt::as_bytes(s).to_vec()
 }
 
 #[cfg(not(unix))]
-fn os_bytes(s: &std::ffi::OsStr) -> Vec<u8> {
+pub fn os_bytes(s: &std::ffi::OsStr) -> Vec<u8> {
     s.to_string_lossy().into_owned().into_bytes()
 }
 
@@ -107,7 +107,7 @@ pub fn is_plain_file(root: &Path, key: &[u8]) -> bool {
             Err(e) => return e.kind() != std::io::ErrorKind::NotFound,
         };
         if parts.peek().is_some() {
-            if !meta.is_dir() || fs::symlink_metadata(path.join(".git")).is_ok() {
+            if !meta.is_dir() || is_repository_dir(&path) {
                 return false;
             }
         } else {
@@ -115,6 +115,15 @@ pub fn is_plain_file(root: &Path, key: &[u8]) -> bool {
         }
     }
     false
+}
+
+/// Тека є межею репозиторію: має запис `.git` або сама є bare-репозиторієм (`HEAD`, `objects/`,
+/// `refs/` — ті самі ознаки, за якими Git розпізнає теку репозиторію).
+fn is_repository_dir(dir: &Path) -> bool {
+    fs::symlink_metadata(dir.join(".git")).is_ok()
+        || (fs::metadata(dir.join("HEAD")).is_ok_and(|m| m.is_file())
+            && fs::metadata(dir.join("objects")).is_ok_and(|m| m.is_dir())
+            && fs::metadata(dir.join("refs")).is_ok_and(|m| m.is_dir()))
 }
 
 /// Читає поточні байти файла за кореневим ключем.

@@ -118,14 +118,14 @@ pub fn render(findings: &mut [Finding]) -> Vec<u8> {
 }
 
 /// Шлях знахідки в теці `arg`, як у `check` для теки.
-pub fn directory_path(arg: &str, key: &[u8]) -> Result<Vec<u8>, String> {
+pub fn directory_path(arg: &[u8], key: &[u8]) -> Result<Vec<u8>, String> {
     printed_path(arg, InputKind::Directory, key)
 }
 
 /// Шлях знахідки: для явного файла — дослівний аргумент, для теки — аргумент, `/` (якщо аргумент
 /// ще не закінчується роздільником) і ключ файла.
-fn printed_path(arg: &str, kind: InputKind, key: &[u8]) -> Result<Vec<u8>, String> {
-    let mut path = arg.as_bytes().to_vec();
+fn printed_path(arg: &[u8], kind: InputKind, key: &[u8]) -> Result<Vec<u8>, String> {
+    let mut path = arg.to_vec();
     if kind == InputKind::Directory {
         let sep_native = cfg!(windows) && path.last() == Some(&b'\\');
         if path.last() != Some(&b'/') && !sep_native {
@@ -170,7 +170,7 @@ pub fn execute(arg: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) -> u8 
     let mut findings = Vec::new();
     let mut failed = false;
     for file in &selected {
-        let label = printed_path(arg, kind, &file.key);
+        let label = printed_path(arg.as_bytes(), kind, &file.key);
         // Коли шлях знахідки неподатний, діагностика все одно називає файл: аргумент + ключ.
         let name = match &label {
             Ok(path) => shown(path),
@@ -286,12 +286,12 @@ mod tests {
 
     #[test]
     fn printed_path_joins_directory_without_doubling_separator() {
-        let p = |a: &str, k: &str, kind| printed_path(a, kind, k.as_bytes()).unwrap();
+        let p = |a: &str, k: &str, kind| printed_path(a.as_bytes(), kind, k.as_bytes()).unwrap();
         assert_eq!(p("./src", "a/b.rs", InputKind::Directory), b"./src/a/b.rs");
         assert_eq!(p("./src/", "a.rs", InputKind::Directory), b"./src/a.rs");
         assert_eq!(p("./x.rs", "x.rs", InputKind::File), b"./x.rs");
         assert_eq!(p(".", "a.rs", InputKind::Directory), b"./a.rs");
-        assert!(printed_path("d", InputKind::Directory, b"a\nb.rs").is_err());
-        assert!(printed_path("a\nb.rs", InputKind::File, b"b.rs").is_err());
+        assert!(printed_path(b"d", InputKind::Directory, b"a\nb.rs").is_err());
+        assert!(printed_path(b"a\nb.rs", InputKind::File, b"b.rs").is_err());
     }
 }

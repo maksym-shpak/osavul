@@ -171,8 +171,10 @@ pub fn worktree_root(arg: &std::path::Path) -> Result<std::path::PathBuf, String
 /// повідомляє про недоступні теки попередженням і все одно завершується успішно) і повних
 /// NUL-завершених записів.
 fn listing(root: &std::path::Path, args: &[&str], what: &str) -> Result<Vec<u8>, String> {
+    // Спостерігач файлової системи з конфігурації репозиторію може виконувати довільний скрипт.
     let out = git()
         .current_dir(root)
+        .args(["-c", "core.fsmonitor=false"])
         .args(args)
         .stdin(Stdio::null())
         .output()
@@ -188,6 +190,24 @@ fn listing(root: &std::path::Path, args: &[&str], what: &str) -> Result<Vec<u8>,
         return Err(format!("{what}: перелік обірвано"));
     }
     Ok(out.stdout)
+}
+
+/// Значення `core.symlinks` для репозиторію; без налаштування Git вважає посилання підтримуваними.
+fn symlinks_supported(root: &std::path::Path) -> Result<bool, String> {
+    let out = git()
+        .current_dir(root)
+        .args(["config", "--type=bool", "--get", "core.symlinks"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("не вдалося запустити git: {e}"))?;
+    match out.status.code() {
+        Some(0) => Ok(out.stdout.trim_ascii() != b"false"),
+        Some(1) => Ok(true),
+        _ => Err(format!(
+            "не вдалося прочитати core.symlinks: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
 }
 
 /// Відбір для gate з диска: відстежувані (зокрема ігноровані) та невідстежувані неігноровані
@@ -211,14 +231,16 @@ pub fn worktree_inventory(arg: &std::path::Path) -> Result<WorktreeInventory, St
         &["ls-files", "-z", "--others", "--exclude-standard"],
         "не вдалося отримати перелік невідстежуваних файлів",
     )?;
-    // true — запис не є звичайним файлом за режимом індексу (посилання, gitlink).
+    // true — запис не є звичайним файлом за режимом індексу. Посилання (120000) тут виняток лише
+    // коли Git матеріалізує його звичайним файлом (core.symlinks=false); інакше тип визначає диск.
+    let links_are_files = !symlinks_supported(&root)?;
     let mut keys: std::collections::BTreeMap<Vec<u8>, bool> = std::collections::BTreeMap::new();
     for record in tracked.split(|b| *b == 0).filter(|r| !r.is_empty()) {
         let bad = || "неочікуваний формат переліку відстежуваних файлів".to_string();
         let tab = record.iter().position(|b| *b == b'\t').ok_or_else(bad)?;
         let meta = std::str::from_utf8(&record[..tab]).map_err(|_| bad())?;
         let mode = meta.split(' ').next().ok_or_else(bad)?;
-        let skip = matches!(mode, "120000" | "160000");
+        let skip = mode == "160000" || (mode == "120000" && links_are_files);
         *keys.entry(record[tab + 1..].to_vec()).or_default() |= skip;
     }
     for path in untracked.split(|b| *b == 0).filter(|r| !r.is_empty()) {

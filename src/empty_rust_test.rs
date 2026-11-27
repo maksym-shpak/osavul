@@ -47,6 +47,12 @@ fn check_syntax(source: &str) -> Result<(), DetectError> {
     let _ = writer.join();
     if out.status.success() {
         Ok(())
+    } else if out.status.code().is_none() {
+        // Аварійне завершення сигналом — збій інструмента, а не відхилення синтаксису файла.
+        Err(DetectError::tool(format!(
+            "rustc аварійно завершився ({}) під час розбору",
+            out.status
+        )))
     } else {
         let diag = String::from_utf8_lossy(&out.stderr);
         Err(DetectError::file(format!(

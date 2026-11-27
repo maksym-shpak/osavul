@@ -26,7 +26,7 @@ struct Found {
 /// Усе, що відомо про один бік порівняння.
 struct Side {
     /// Дослівний аргумент теки для подання шляхів у формі `--path`.
-    prefix: Option<String>,
+    prefix: Option<Vec<u8>>,
     findings: Vec<Found>,
     dup_keys: Vec<Vec<u8>>,
     dup: Analysis,
@@ -38,7 +38,7 @@ struct Raw {
     keys: Vec<Vec<u8>>,
     selections: Vec<git_tree::Selection>,
     contents: Vec<Result<Vec<u8>, String>>,
-    prefix: Option<String>,
+    prefix: Option<Vec<u8>>,
 }
 
 impl Raw {
@@ -58,7 +58,7 @@ pub fn compare_commits(base: &str, rev: &str) -> Result<Verdict, Vec<String>> {
 }
 
 /// Порівнює коміт бази з поточним вмістом теки `dir` (верхня тека робочого дерева).
-pub fn compare_worktree(base: &str, dir: &str) -> Result<Verdict, Vec<String>> {
+pub fn compare_worktree(base: &str, dir: &std::ffi::OsStr) -> Result<Verdict, Vec<String>> {
     compare(collect("база", base), collect_worktree(dir))
 }
 
@@ -118,7 +118,7 @@ fn collect(label: &'static str, rev: &str) -> Result<Raw, String> {
     })
 }
 
-fn collect_worktree(dir: &str) -> Result<Raw, String> {
+fn collect_worktree(dir: &std::ffi::OsStr) -> Result<Raw, String> {
     let inv = git_tree::worktree_inventory(std::path::Path::new(dir))
         .map_err(|e| format!("ревізія: {e}"))?;
     let contents = inv
@@ -131,7 +131,7 @@ fn collect_worktree(dir: &str) -> Result<Raw, String> {
         keys: inv.keys,
         selections: inv.selections,
         contents,
-        prefix: Some(dir.to_string()),
+        prefix: Some(local_tree::os_bytes(dir)),
     })
 }
 
@@ -174,7 +174,12 @@ fn analyze(
         }
         if selection.check {
             match content {
-                Ok(_) if !rust_ok && check::uses_rust(key) => {}
+                // Без rustc синтаксис не перевірити, але кодування файла від нього не залежить.
+                Ok(bytes) if !rust_ok && check::uses_rust(key) => {
+                    if let Err(e) = std::str::from_utf8(bytes) {
+                        fail(key, false, format!("вміст не є UTF-8: {e}"));
+                    }
+                }
                 Ok(bytes) => match check::check_bytes(key, bytes) {
                     Ok(positions) => {
                         findings.extend(positions.into_iter().map(|(rule, line)| Found {
@@ -224,7 +229,7 @@ fn analyze(
     }
 }
 
-fn print_path(prefix: Option<&str>, key: &[u8]) -> Result<Vec<u8>, String> {
+fn print_path(prefix: Option<&[u8]>, key: &[u8]) -> Result<Vec<u8>, String> {
     match prefix {
         None => check::commit_path(key),
         Some(arg) => check::directory_path(arg, key),

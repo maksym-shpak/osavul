@@ -433,6 +433,10 @@ impl Repo {
     fn new(name: &str) -> Repo {
         let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
             .join(format!("cx-{}-{name}", std::process::id()));
+        Repo::new_in(base)
+    }
+
+    fn new_in(base: PathBuf) -> Repo {
         let _ = fs::remove_dir_all(&base);
         let root = base.join("repo");
         let home = base.join("home");
@@ -2437,7 +2441,13 @@ fn gate_target_errors_beat_violation_and_name_every_file_with_base_warning() {
 /// Запуск gate із PATH, де є лише Git: `rustc` недоступний, а Git справний.
 #[cfg(unix)]
 fn gate_without_rustc(repo: &Repo, base: &str, rev: &str) -> Output {
-    let bin = repo.home.join("git-only");
+    gate_with_tools(repo, base, rev, None)
+}
+
+/// Те саме, але з підставним `rustc`-скриптом (текст сценарію `sh`).
+#[cfg(unix)]
+fn gate_with_tools(repo: &Repo, base: &str, rev: &str, rustc: Option<&str>) -> Output {
+    let bin = repo.home.join(if rustc.is_some() { "git-fake" } else { "git-only" });
     fs::create_dir_all(&bin).unwrap();
     let git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
         .map(|d| d.join("git"))
@@ -2447,11 +2457,54 @@ fn gate_without_rustc(repo: &Repo, base: &str, rev: &str) -> Output {
     if !link.exists() {
         std::os::unix::fs::symlink(git, link).unwrap();
     }
+    if let Some(script) = rustc {
+        let fake = bin.join("rustc");
+        fs::write(&fake, format!("#!/bin/sh\n{script}\n")).unwrap();
+        set_mode(&fake, 0o755);
+    }
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
     cmd.args(["gate", base, rev]).current_dir(&repo.root);
     isolate(&mut cmd, &repo.home);
     cmd.env("PATH", &bin);
     cmd.output().unwrap()
+}
+
+/// Аварія `rustc` на файлі бази — збій інструмента: код 2, а не попередження й «пройдено».
+#[cfg(unix)]
+#[test]
+fn gate_rustc_crash_on_base_file_is_fatal() {
+    let repo = Repo::new("gate-rustc-crash");
+    repo.write("ok.test.ts", FULL_TS.as_bytes());
+    repo.write("gen.rs", b"// CRASH\nfn main() {}\n");
+    let base = repo.commit("base");
+    repo.git(&["rm", "-q", "gen.rs"]);
+    let rev = repo.commit("drop");
+    // Пробний текст проходить, текст із маркером валить процес сигналом.
+    // У PATH лише вбудовані команди sh.
+    let script = "while read -r l; do case $l in *CRASH*) kill -SEGV $$;; esac; done";
+    let out = gate_with_tools(&repo, &base, &rev, Some(script));
+    assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
+    assert!(out.stdout.is_empty());
+    assert!(stderr_of(&out).contains("rustc"), "{}", stderr_of(&out));
+}
+
+/// Без rustc кодування Rust-файлів усе одно перевіряється, і діагностика називає кожен файл.
+#[cfg(unix)]
+#[test]
+fn gate_without_rustc_still_reports_undecodable_rust_and_broken_files() {
+    let repo = Repo::new("gate-norustc-decode");
+    repo.write("ok.test.ts", FULL_TS.as_bytes());
+    let base = repo.commit("base");
+    repo.write("undecodable.rs", b"\xff\xfe");
+    repo.write("broken.ts", b"function (");
+    let rev = repo.commit("bad files");
+    let out = gate_without_rustc(&repo, &base, &rev);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    let err = stderr_of(&out);
+    for part in ["rustc", "undecodable.rs", "broken.ts"] {
+        assert!(err.contains(part), "{err}");
+    }
 }
 
 #[cfg(unix)]
@@ -2468,8 +2521,8 @@ fn gate_needs_rustc_only_when_rust_files_are_selected() {
     repo.git(&["rm", "-rq", "target"]);
     repo.write("lib.rs", b"\xff\xfe");
     let base = repo.commit("bad rs");
-    repo.write("lib.rs", b"fn ok() {}\n");
-    let rev = repo.commit("fixed rs");
+    repo.git(&["rm", "-q", "lib.rs"]);
+    let rev = repo.commit("removed rs");
     let out = gate_without_rustc(&repo, &base, &rev);
     assert_eq!(out.status.code(), Some(2));
     assert!(out.stdout.is_empty());
@@ -2614,6 +2667,10 @@ fn gate_path_skips_nested_repositories_gitlinks_and_materialized_links() {
     repo.git(&["init", "-q", "nested"]);
     repo.write("nested/y.test.ts", EMPTY_TS.as_bytes());
     // Посилання в індексі, матеріалізоване звичайним файлом (core.symlinks=false).
+    repo.git(&["config", "core.symlinks", "false"]);
+    // Вкладений bare-репозиторій: Git перелічує його файли окремо, але це чужий репозиторій.
+    repo.git(&["init", "-q", "--bare", "nested.git"]);
+    repo.write("nested.git/fixture.test.ts", EMPTY_TS.as_bytes());
     repo.write("link.test.ts", EMPTY_TS.as_bytes());
     let oid = repo.git(&["hash-object", "-w", "link.test.ts"]);
     repo.git(&[
@@ -2677,12 +2734,20 @@ fn gate_path_target_errors_name_every_file_and_beat_violation() {
 #[cfg(unix)]
 #[test]
 fn gate_path_incomplete_untracked_listing_is_fatal_despite_git_success() {
-    let repo = Repo::new("gate-path-locked");
+    // Від root фікстура лежить під власним каталогом у /tmp: права змінюються лише на її шляхах.
+    let repo = if is_root() {
+        let shared = PathBuf::from("/tmp").join(format!("osavul-local-{}", std::process::id()));
+        fs::create_dir_all(&shared).unwrap();
+        set_mode(&shared, 0o755);
+        Repo::new_in(shared.join("gate-path-locked"))
+    } else {
+        Repo::new("gate-path-locked")
+    };
     repo.write("ok.test.ts", FULL_TS.as_bytes());
     let base = repo.commit("base");
     repo.write("locked/h.test.ts", EMPTY_TS.as_bytes());
-    let mut dirs = vec![repo.root.parent().unwrap().to_path_buf(), repo.root.clone()];
-    dirs.extend(repo.root.ancestors().skip(1).map(Path::to_path_buf));
+    let fixture = repo.root.parent().unwrap().to_path_buf();
+    let dirs = vec![fixture, repo.root.clone()];
     let run = || {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
         cmd.args(["gate", &base, "--path", "."])
@@ -2719,4 +2784,84 @@ fn gate_path_incomplete_untracked_listing_is_fatal_despite_git_success() {
     assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
     assert!(out.stdout.is_empty());
     assert!(stderr_of(&out).contains("невідстежуваних"), "{}", stderr_of(&out));
+}
+
+/// Звичайний файл на місці відстежуваного посилання (core.symlinks=true) аналізується за диском.
+#[cfg(unix)]
+#[test]
+fn gate_path_analyzes_regular_file_replacing_tracked_symlink() {
+    let repo = Repo::new("gate-path-link-replaced");
+    repo.git(&["config", "core.symlinks", "true"]);
+    repo.write("ok.test.ts", FULL_TS.as_bytes());
+    std::os::unix::fs::symlink("ok.test.ts", repo.root.join("a.test.ts")).unwrap();
+    let base = repo.commit("base");
+    fs::remove_file(repo.root.join("a.test.ts")).unwrap();
+    repo.write("a.test.ts", EMPTY_TS.as_bytes());
+    let out = gate_path(&repo, &repo.root, &base, ".");
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains(&format!("./a.test.ts:2: empty-test: {MSG}\n")),
+        "{}",
+        stdout_of(&out)
+    );
+}
+
+/// Налаштований у репозиторії `core.fsmonitor` — це виконуваний скрипт; gate не має його запускати.
+#[cfg(unix)]
+#[test]
+fn gate_path_does_not_run_fsmonitor_hook() {
+    let repo = Repo::new("gate-path-fsmonitor");
+    repo.write("ok.test.ts", FULL_TS.as_bytes());
+    let base = repo.commit("base");
+    let marker = repo.home.join("fsmonitor-ran");
+    let hook = repo.home.join("fsmonitor.sh");
+    fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+    set_mode(&hook, 0o755);
+    repo.git(&["config", "core.fsmonitor", hook.to_str().unwrap()]);
+    // Контроль: сам Git скрипт запускає.
+    repo.git(&["status", "--short"]);
+    assert!(marker.exists(), "контрольний запуск Git не виконав скрипта");
+    fs::remove_file(&marker).unwrap();
+    let out = gate_path(&repo, &repo.root, &base, ".");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    assert!(!marker.exists(), "gate виконав скрипт core.fsmonitor");
+}
+
+/// Кореневу теку з байтом поза UTF-8 в імені можна передати як `.` і як `../<ім'я>`.
+#[cfg(target_os = "linux")]
+#[test]
+fn gate_path_accepts_non_utf8_worktree_root_argument() {
+    use std::os::unix::ffi::OsStrExt;
+    let base_dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("cx-{}-gate-raw-root", std::process::id()));
+    let _ = fs::remove_dir_all(&base_dir);
+    let name = std::ffi::OsStr::from_bytes(b"repo\xff");
+    let root = base_dir.join(name);
+    let home = base_dir.join("home");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    let repo = Repo { root, home };
+    repo.git(&["init", "-q", "-b", "main"]);
+    repo.write("ok.test.ts", FULL_TS.as_bytes());
+    let base = repo.commit("base");
+    repo.write("t.test.ts", EMPTY_TS.as_bytes());
+
+    let dot = gate_path(&repo, &repo.root, &base, ".");
+    assert_eq!(dot.status.code(), Some(1), "{}", stderr_of(&dot));
+    let line = format!("t.test.ts:2: empty-test: {MSG}\n");
+    assert!(dot.stdout.windows(line.len() + 2).any(|w| w == format!("./{line}").as_bytes()));
+
+    let mut arg = b"../".to_vec();
+    arg.extend_from_slice(b"repo\xff");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
+    cmd.args(["gate", &base, "--path"])
+        .arg(std::ffi::OsStr::from_bytes(&arg))
+        .current_dir(&repo.root);
+    isolate(&mut cmd, &repo.home);
+    let out = cmd.output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    let mut expected = arg.clone();
+    expected.push(b'/');
+    expected.extend_from_slice(line.as_bytes());
+    assert!(out.stdout.windows(expected.len()).any(|w| w == expected.as_slice()));
 }

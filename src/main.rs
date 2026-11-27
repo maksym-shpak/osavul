@@ -206,13 +206,16 @@ fn coverage(args: &[OsString]) -> ExitCode {
 /// Публікує вердикт gate: спершу діагностики, потім готовий буфер. Код 1 тут — це вердикт, а не
 /// неповнота, тому `emit` не підходить.
 fn gate(base: &OsString, target: &OsString, path_mode: bool) -> ExitCode {
-    let (Some(base), Some(target)) = (base.to_str(), target.to_str()) else {
+    let Some(base) = base.to_str() else {
         return usage_error();
     };
+    // Аргумент теки лишається нативним шляхом; текстовим мусить бути лише ревізія.
     let result = if path_mode {
         gate::compare_worktree(base, target)
+    } else if let Some(rev) = target.to_str() {
+        gate::compare_commits(base, rev)
     } else {
-        gate::compare_commits(base, target)
+        return usage_error();
     };
     match result {
         Ok(verdict) => {
