@@ -35,11 +35,10 @@ pub const METRICS: Policy = Policy {
     skip_nested_dirs: &[],
 };
 
-/// Політика `check`: `.ts` (разом із `.d.ts`) і `.rs`, вкладені теки `target` пропускаються.
-// Підключається рушієм `check` наступною частиною плану.
-#[allow(dead_code)]
+/// Політика `check`: суфікси мов, які вже підтримують правила (поки лише `.rs`), вкладені теки
+/// `target` пропускаються.
 pub const CHECK: Policy = Policy {
-    suffixes: &[b".ts", b".rs"],
+    suffixes: &[b".rs"],
     skip_nested_dirs: &["target"],
 };
 
@@ -226,9 +225,14 @@ mod tests {
                 "types.d.ts"
             ]
         );
-        // Політика check: `.rs` і `.ts`, вкладені `target` пропущені, регістр суфікса значущий.
+        // Політика з обома суфіксами, як у `check` після додавання TypeScript: вкладені `target`
+        // пропущені, регістр суфікса значущий.
+        let both = Policy {
+            suffixes: &[b".ts", b".rs"],
+            skip_nested_dirs: CHECK.skip_nested_dirs,
+        };
         assert_eq!(
-            keys_with(&root, &CHECK),
+            keys_with(&root, &both),
             [
                 "a.b/y.ts",
                 "a.ts",
@@ -242,7 +246,7 @@ mod tests {
             ]
         );
         // Явний корінь `target` не пропускається.
-        assert_eq!(keys_with(&root.join("target"), &CHECK), ["a.ts", "b.rs"]);
+        assert_eq!(keys_with(&root.join("target"), &both), ["a.ts", "b.rs"]);
     }
 
     // Фізичні посилання потребують POSIX API (на Windows їх створення може вимагати прав).
