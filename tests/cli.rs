@@ -1908,7 +1908,9 @@ fn directory_with_unprintable_nested_name_fails_only_that_file() {
         String::from_utf8(out.stdout).unwrap(),
         format!("./c.rs:2: empty-test: {MSG}\n")
     );
-    assert!(!out.stderr.is_empty());
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("\"./a\\nb.rs\""), "{err}");
+    assert!(err.contains("один запис"), "{err}");
 }
 
 #[cfg(unix)]

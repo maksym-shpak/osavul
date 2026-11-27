@@ -107,7 +107,18 @@ pub fn execute(arg: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) -> u8 
     let mut failed = false;
     for file in &selected {
         let label = printed_path(arg, kind, &file.key);
-        let name = shown(label.as_deref().unwrap_or(arg.as_bytes()));
+        // Коли шлях знахідки неподатний, діагностика все одно називає файл: аргумент + ключ.
+        let name = match &label {
+            Ok(path) => shown(path),
+            Err(_) => {
+                let mut raw = arg.as_bytes().to_vec();
+                if kind == InputKind::Directory {
+                    raw.push(b'/');
+                    raw.extend_from_slice(&file.key);
+                }
+                format!("{:?}", String::from_utf8_lossy(&raw))
+            }
+        };
         let result = check_file(&file.disk, &file.key);
         let positions = match result {
             Ok(p) => p,
