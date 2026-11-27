@@ -14,9 +14,47 @@ pub enum Lang {
     TypeScript,
 }
 
+/// Категорія відмови детектора: проблема вхідного файла чи недоступність потрібного інструмента.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))] // читається gate у наступних частинах
+pub enum FailureKind {
+    File,
+    Tool,
+}
+
+/// Причина відмови детектора разом із категорією.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectError {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub kind: FailureKind,
+    pub reason: String,
+}
+
+impl DetectError {
+    pub fn file(reason: impl Into<String>) -> Self {
+        Self {
+            kind: FailureKind::File,
+            reason: reason.into(),
+        }
+    }
+
+    pub fn tool(reason: impl Into<String>) -> Self {
+        Self {
+            kind: FailureKind::Tool,
+            reason: reason.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for DetectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
 /// Мовна реалізація: вміст одного файла й ім'я для режиму розбору → фізичні рядки від 1 (з
-/// повторами) або причина відмови файла.
-pub type Detector = fn(&[u8], &str) -> Result<Vec<usize>, String>;
+/// повторами) або причина відмови з категорією.
+pub type Detector = fn(&[u8], &str) -> Result<Vec<usize>, DetectError>;
 
 /// Правило: один ідентифікатор і повідомлення для всіх мов та реалізація для кожної мови.
 pub struct Rule {
@@ -156,8 +194,14 @@ pub fn execute(arg: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) -> u8 
 }
 
 /// Читає файл і запускає всі застосовні правила; успіх лише коли успішні всі.
-fn check_file(disk: &Path, key: &[u8]) -> Result<Vec<(&'static Rule, usize)>, String> {
-    let source = std::fs::read(disk).map_err(|e| format!("не вдалося прочитати: {e}"))?;
+fn check_file(disk: &Path, key: &[u8]) -> Result<Vec<(&'static Rule, usize)>, DetectError> {
+    let source =
+        std::fs::read(disk).map_err(|e| DetectError::file(format!("не вдалося прочитати: {e}")))?;
+    check_bytes(key, &source)
+}
+
+/// Застосовує правила до вже прочитаних байтів; `key` визначає мову й режим розбору.
+pub fn check_bytes(key: &[u8], source: &[u8]) -> Result<Vec<(&'static Rule, usize)>, DetectError> {
     let Some(lang) = language_of(key) else {
         return Ok(Vec::new());
     };
@@ -166,7 +210,7 @@ fn check_file(disk: &Path, key: &[u8]) -> Result<Vec<(&'static Rule, usize)>, St
     for rule in RULES {
         for (l, detect) in rule.detectors {
             if *l == lang {
-                for line in detect(&source, &name)? {
+                for line in detect(source, &name)? {
                     all.push((*rule, line));
                 }
             }
@@ -219,6 +263,7 @@ mod tests {
         assert_eq!(p("./src", "a/b.rs", InputKind::Directory), b"./src/a/b.rs");
         assert_eq!(p("./src/", "a.rs", InputKind::Directory), b"./src/a.rs");
         assert_eq!(p("./x.rs", "x.rs", InputKind::File), b"./x.rs");
+        assert_eq!(p(".", "a.rs", InputKind::Directory), b"./a.rs");
         assert!(printed_path("d", InputKind::Directory, b"a\nb.rs").is_err());
         assert!(printed_path("a\nb.rs", InputKind::File, b"b.rs").is_err());
     }

@@ -2,22 +2,25 @@
 //! функцій, атрибутів і тіл шукає вузький обхід токенів того самого тексту.
 
 use std::io::Write;
+
+use crate::check::DetectError;
 use std::process::{Command, Stdio};
 
 /// Повертає фізичні номери рядків `fn` порожніх тестів у порядку появи.
 ///
 /// `Err`, якщо `rustc` не запустився, текст не розбирається або дужки незбалансовані.
-pub fn find_empty_tests(source: &str) -> Result<Vec<usize>, String> {
+pub fn find_empty_tests(source: &str) -> Result<Vec<usize>, DetectError> {
     check_syntax(source)?;
-    let tokens = lex(source.strip_prefix('\u{feff}').unwrap_or(source))?;
-    let close_of = match_groups(&tokens)?;
+    let tokens =
+        lex(source.strip_prefix('\u{feff}').unwrap_or(source)).map_err(DetectError::file)?;
+    let close_of = match_groups(&tokens).map_err(DetectError::file)?;
     let mut lines = Vec::new();
     walk_items(&tokens, &close_of, 0, tokens.len(), &mut lines);
     Ok(lines)
 }
 
 /// Перевіряє синтаксис через локальний `rustc`; `Err` — `rustc` не запустився або відхилив текст.
-fn check_syntax(source: &str) -> Result<(), String> {
+fn check_syntax(source: &str) -> Result<(), DetectError> {
     // -Z потребує RUSTC_BOOTSTRAP; змінна ставиться лише дочірньому процесу.
     let mut child = Command::new("rustc")
         .args(["--edition", "2024", "-Z", "parse-crate-root-only", "-"])
@@ -26,7 +29,7 @@ fn check_syntax(source: &str) -> Result<(), String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("не вдалося запустити локальний rustc: {e}"))?;
+        .map_err(|e| DetectError::tool(format!("не вдалося запустити локальний rustc: {e}")))?;
     let mut stdin = child.stdin.take().expect("stdin запитано");
     let data = source.as_bytes().to_vec();
     // Окремий потік, щоб великий вхід не заблокував обмін через канали.
@@ -35,16 +38,16 @@ fn check_syntax(source: &str) -> Result<(), String> {
     });
     let out = child
         .wait_with_output()
-        .map_err(|e| format!("rustc не завершився коректно: {e}"))?;
+        .map_err(|e| DetectError::tool(format!("rustc не завершився коректно: {e}")))?;
     let _ = writer.join();
     if out.status.success() {
         Ok(())
     } else {
         let diag = String::from_utf8_lossy(&out.stderr);
-        Err(format!(
+        Err(DetectError::file(format!(
             "розбір не вдався (потрібен rustc 1.100.0 із режимом -Z parse-crate-root-only):\n{}",
             diag.trim_end()
-        ))
+        )))
     }
 }
 
