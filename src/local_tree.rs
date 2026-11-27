@@ -29,7 +29,6 @@ pub struct Policy {
     pub skip_nested_dirs: &'static [&'static str],
 }
 
-/// Типова політика метрик.
 pub const METRICS: Policy = Policy {
     suffixes: &[b".ts"],
     skip_nested_dirs: &[],
@@ -292,7 +291,6 @@ mod tests {
             assert!(select(&root.join("none.ts"), policy).is_err());
             assert!(select(&root.join("a.txt"), policy).is_err());
         }
-        // `.rs` дозволений лише політикою check.
         touch(&root, "r.rs");
         assert!(select(&root.join("r.rs"), &METRICS).is_err());
         assert!(select(&root.join("r.rs"), &CHECK).is_ok());

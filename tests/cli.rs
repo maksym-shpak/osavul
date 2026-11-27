@@ -1832,7 +1832,6 @@ fn directory_report_uses_argument_spelling_order_and_skips_excluded() {
     }
 }
 
-// Порожній відбір — чистий результат; відсутній шлях — помилка.
 #[test]
 fn directory_without_supported_files_is_clean_and_missing_path_is_error() {
     let dir = local_dir("check-empty");
@@ -1843,7 +1842,6 @@ fn directory_without_supported_files_is_clean_and_missing_path_is_error() {
     assert_check_error(&["check", dir.join("missing").to_str().unwrap()]);
 }
 
-// Виявляє часткову перевірку: зламаний файл не друкує знахідок, але сусід друкує, код 2.
 #[test]
 fn broken_file_is_reported_while_neighbour_findings_are_printed() {
     let dir = local_dir("check-partial");
@@ -1927,7 +1925,6 @@ fn nested_non_utf8_name_is_printed_as_raw_bytes() {
     assert_eq!(out.stdout, expected);
 }
 
-// Виявляє ігнорування відмови запису stdout у `check`.
 #[test]
 fn check_stdout_write_failure_is_fatal() {
     let path = temp_file("pipe.rs", EMPTY.as_bytes());
@@ -1980,7 +1977,6 @@ fn mixed_directory_prints_both_languages_in_order() {
         );
         assert_eq!(String::from_utf8(first.stdout).unwrap(), expected, "{arg}");
     }
-    // Явний файл зберігає написання аргументу.
     let out = run_in(Some(&dir), &["check", "./b.ts"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(
@@ -2059,7 +2055,6 @@ fn rustc_is_needed_only_when_rust_files_are_selected() {
     assert!(String::from_utf8(both.stderr).unwrap().contains("./b.rs"));
 }
 
-// Структурний перевірник корпусу приймає повний каталог і називає відсутній TypeScript-файл.
 #[test]
 fn corpus_checker_accepts_full_corpus_and_detects_missing_file() {
     let tmp =

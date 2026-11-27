@@ -25,7 +25,6 @@ pub struct Rule {
     pub detectors: &'static [(Lang, Detector)],
 }
 
-/// Статичний перелік правил, вбудований у бінарник.
 const RULES: &[&Rule] = &[&EMPTY_TEST];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,7 +196,6 @@ mod tests {
         }
     }
 
-    // Виявляє зміну ключів порядку (байти шляху, числовий рядок, ідентифікатор) і втрату повторів.
     #[test]
     fn orders_by_path_bytes_numeric_line_rule_and_keeps_duplicates() {
         let mut v = vec![
