@@ -2782,7 +2782,14 @@ fn gate_path_incomplete_untracked_listing_is_fatal_despite_git_success() {
         Repo::new("gate-path-locked")
     };
     repo.write("ok.test.ts", FULL_TS.as_bytes());
+    repo.write("archived.ts", b"let a = 1;\n");
     let base = repo.commit("base");
+    // Відома помилка файла бази має пережити фатальну відмову переліку диска.
+    let oid = repo.git(&["rev-parse", "HEAD:archived.ts"]);
+    let obj = repo.loose_object(&oid);
+    make_writable(&obj);
+    fs::write(&obj, b"not a zlib stream").unwrap();
+    repo.write("archived.ts", b"let b = 2;\n");
     repo.write("locked/h.test.ts", EMPTY_TS.as_bytes());
     let fixture = repo.root.parent().unwrap().to_path_buf();
     let dirs = vec![fixture, repo.root.clone()];
@@ -2822,6 +2829,37 @@ fn gate_path_incomplete_untracked_listing_is_fatal_despite_git_success() {
     assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
     assert!(out.stdout.is_empty());
     assert!(stderr_of(&out).contains("невідстежуваних"), "{}", stderr_of(&out));
+    assert!(stderr_of(&out).contains("archived.ts"), "{}", stderr_of(&out));
+}
+
+/// Відносні GIT_DIR і GIT_WORK_TREE діють від теки запуску: перелік не має «переїжджати» в корінь.
+#[cfg(unix)]
+#[test]
+fn gate_path_keeps_relative_git_context_from_subdirectory() {
+    let repo = Repo::new("gate-path-relative-ctx");
+    repo.write("ok.test.ts", FULL_TS.as_bytes());
+    let base = repo.commit("base");
+    repo.write("sub/keep.txt", b"x\n");
+    repo.write("ignored.test.ts", EMPTY_TS.as_bytes());
+    repo.write(".gitignore", b"ignored.test.ts\n");
+    repo.git(&["add", "-f", "ignored.test.ts"]);
+    let sub = repo.root.join("sub");
+    let run = |args: &[&str]| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
+        cmd.args(args)
+            .current_dir(&sub)
+            .env("GIT_DIR", "../.git")
+            .env("GIT_WORK_TREE", "..");
+        isolate(&mut cmd, &repo.home);
+        cmd.output().unwrap()
+    };
+    let out = run(&["gate", &base, "--path", ".."]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains(&format!("../ignored.test.ts:2: empty-test: {MSG}\n")),
+        "{}",
+        stdout_of(&out)
+    );
 }
 
 /// Звичайний файл на місці відстежуваного посилання (core.symlinks=true) аналізується за диском.

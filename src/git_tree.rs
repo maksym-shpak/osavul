@@ -170,10 +170,11 @@ pub fn worktree_root(arg: &std::path::Path) -> Result<std::path::PathBuf, String
 /// Перелік шляхів від кореня робочого дерева: успіх лише за статусу 0, порожнього stderr (Git
 /// повідомляє про недоступні теки попередженням і все одно завершується успішно) і повних
 /// NUL-завершених записів.
-fn listing(root: &std::path::Path, args: &[&str], what: &str) -> Result<Vec<u8>, String> {
+fn listing(args: &[&str], what: &str) -> Result<Vec<u8>, String> {
+    // Git запускається з початкової теки, щоб відносні GIT_DIR/GIT_WORK_TREE лишалися чинними;
+    // `--full-name` і `:/` дають шляхи від кореня дерева незалежно від місця запуску.
     // Спостерігач файлової системи з конфігурації репозиторію може виконувати довільний скрипт.
     let out = git()
-        .current_dir(root)
         .args(["-c", "core.fsmonitor=false"])
         .args(args)
         .stdin(Stdio::null())
@@ -193,9 +194,8 @@ fn listing(root: &std::path::Path, args: &[&str], what: &str) -> Result<Vec<u8>,
 }
 
 /// Значення `core.symlinks` для репозиторію; без налаштування Git вважає посилання підтримуваними.
-fn symlinks_supported(root: &std::path::Path) -> Result<bool, String> {
+fn symlinks_supported() -> Result<bool, String> {
     let out = git()
-        .current_dir(root)
         .args(["config", "--type=bool", "--get", "core.symlinks"])
         .stdin(Stdio::null())
         .output()
@@ -222,18 +222,16 @@ pub struct WorktreeInventory {
 pub fn worktree_inventory(arg: &std::path::Path) -> Result<WorktreeInventory, String> {
     let root = worktree_root(arg)?;
     let tracked = listing(
-        &root,
-        &["ls-files", "-z", "--stage"],
+        &["ls-files", "-z", "--stage", "--full-name", "--", ":/"],
         "не вдалося отримати перелік відстежуваних файлів",
     )?;
     let untracked = listing(
-        &root,
-        &["ls-files", "-z", "--others", "--exclude-standard"],
+        &["ls-files", "-z", "--others", "--exclude-standard", "--full-name", "--", ":/"],
         "не вдалося отримати перелік невідстежуваних файлів",
     )?;
     // true — запис не є звичайним файлом за режимом індексу. Посилання (120000) тут виняток лише
     // коли Git матеріалізує його звичайним файлом (core.symlinks=false); інакше тип визначає диск.
-    let links_are_files = !symlinks_supported(&root)?;
+    let links_are_files = !symlinks_supported()?;
     let mut keys: std::collections::BTreeMap<Vec<u8>, bool> = std::collections::BTreeMap::new();
     for record in tracked.split(|b| *b == 0).filter(|r| !r.is_empty()) {
         let bad = || "неочікуваний формат переліку відстежуваних файлів".to_string();

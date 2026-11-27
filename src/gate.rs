@@ -69,10 +69,19 @@ fn compare(
     let (base_raw, target_raw) = match (base_raw, target_raw) {
         (Ok(b), Ok(t)) => (b, t),
         (b, t) => {
-            let mut errors = Vec::new();
-            errors.extend(b.err());
-            errors.extend(t.err());
-            return Err(errors);
+            // Уже встановлені пофайлові діагностики доступного боку не втрачаємо.
+            let (mut warnings, mut file_errors, mut errors) = (Vec::new(), Vec::new(), Vec::new());
+            for side in [b, t] {
+                match side {
+                    Ok(raw) => {
+                        analyze(&raw, true, &mut warnings, &mut file_errors);
+                    }
+                    Err(e) => errors.push(e),
+                }
+            }
+            warnings.extend(errors);
+            warnings.extend(file_errors);
+            return Err(warnings);
         }
     };
 
