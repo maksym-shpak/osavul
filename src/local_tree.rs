@@ -54,8 +54,6 @@ impl Policy {
 
     /// Відбір кореневого ключа (`a/b.ts`): суфікс і жодної виключеної теки серед цілих компонентів
     /// шляху. Збігається з обходом `select` для вкладених файлів.
-    // Споживач — відбір gate з Git-дерева та диска (наступні частини).
-    #[allow(dead_code)]
     pub fn selects_key(&self, key: &[u8]) -> bool {
         let mut parts = key.split(|b| *b == b'/');
         let _file = parts.next_back();
@@ -308,7 +306,12 @@ mod tests {
             assert!(sel(policy, "a.ts") && sel(policy, "types.d.ts"));
             assert!(sel(policy, "my.git/a.ts") && sel(policy, "node_modules2/a.ts"));
             assert!(sel(policy, "x/.github/a.ts"));
-            for k in [".git/a.ts", "x/.git/a.ts", "node_modules/a.ts", "a/node_modules/b/c.ts"] {
+            for k in [
+                ".git/a.ts",
+                "x/.git/a.ts",
+                "node_modules/a.ts",
+                "a/node_modules/b/c.ts",
+            ] {
                 assert!(!sel(policy, k), "{k}");
             }
             assert!(!sel(policy, "a.tsx") && !sel(policy, "A.TS"));

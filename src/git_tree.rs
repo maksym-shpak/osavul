@@ -3,6 +3,8 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
 
+use crate::local_tree;
+
 /// Вміст об'єкта не вдалося отримати: його немає, він не `blob` або вивід Git обірвано.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ReadError;
@@ -81,15 +83,53 @@ pub fn match_root() -> Result<Vec<u8>, String> {
 /// звичайних файлів `.ts` від кореня дерева цього коміту.
 pub fn inventory(rev: &str) -> Result<Inventory, String> {
     let sha = resolve_commit(rev)?;
-
-    let mut cmd = git();
-    cmd.args(["ls-tree", "-r", "-z", "--full-tree", &sha]);
-    let listing = run(cmd, &format!("не вдалося прочитати дерево коміту {sha}"))?;
-    let entries = parse_listing(&listing)?
+    let entries = tree_entries(&sha)?
         .into_iter()
         .filter(|e| e.path.ends_with(b".ts"))
         .collect();
     Ok(Inventory { sha, entries })
+}
+
+/// Усі звичайні й виконувані `blob` повного дерева коміту.
+fn tree_entries(sha: &str) -> Result<Vec<Entry>, String> {
+    let mut cmd = git();
+    cmd.args(["ls-tree", "-r", "-z", "--full-tree", sha]);
+    let listing = run(cmd, &format!("не вдалося прочитати дерево коміту {sha}"))?;
+    parse_listing(&listing)
+}
+
+/// До яких умов gate входить запис коміту.
+#[derive(Debug, Clone, Copy)]
+pub struct Selection {
+    pub check: bool,
+    pub dup: bool,
+}
+
+/// Відбір для gate: записи, що входять хоча б в одну умову за політиками `CHECK` і `METRICS`,
+/// застосованими до кореневого байтового ключа. Окремий від `inventory`, щоб звіти метрик
+/// зберегли свій відбір.
+pub struct GateInventory {
+    pub entries: Vec<Entry>,
+    pub selections: Vec<Selection>,
+}
+
+pub fn gate_inventory(rev: &str) -> Result<GateInventory, String> {
+    let sha = resolve_commit(rev)?;
+    let mut inv = GateInventory {
+        entries: Vec::new(),
+        selections: Vec::new(),
+    };
+    for entry in tree_entries(&sha)? {
+        let selection = Selection {
+            check: local_tree::CHECK.selects_key(&entry.path),
+            dup: local_tree::METRICS.selects_key(&entry.path),
+        };
+        if selection.check || selection.dup {
+            inv.entries.push(entry);
+            inv.selections.push(selection);
+        }
+    }
+    Ok(inv)
 }
 
 /// Розв'язує ревізію як окремий аргумент Git без переписування виразу. Неоднозначні імена

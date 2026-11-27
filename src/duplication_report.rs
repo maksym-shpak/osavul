@@ -475,7 +475,11 @@ mod tests {
             .collect();
         assert_eq!(
             reasons,
-            [Some("syntax-error"), Some("invalid-utf8"), Some("read-error")]
+            [
+                Some("syntax-error"),
+                Some("invalid-utf8"),
+                Some("read-error")
+            ]
         );
         assert_eq!(v["duplications"].as_array().unwrap().len(), 1);
         assert_eq!(v["files"][0]["duplicatedLines"], 10);

@@ -65,6 +65,19 @@ pub struct Rule {
 
 const RULES: &[&Rule] = &[&EMPTY_TEST];
 
+/// Повний реєстр правил: кожне з них стає окремою умовою gate.
+pub fn rules() -> &'static [&'static Rule] {
+    RULES
+}
+
+/// Шлях знахідки для коміту: кореневий ключ без префікса; має вміщуватися в один запис.
+pub fn commit_path(key: &[u8]) -> Result<Vec<u8>, String> {
+    if key.contains(&b'\n') {
+        return Err("шлях містить перенесення рядка й не вміщується в один запис".into());
+    }
+    Ok(key.to_vec())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
     pub path: Vec<u8>,
@@ -122,7 +135,7 @@ fn printed_path(arg: &str, kind: InputKind, key: &[u8]) -> Result<Vec<u8>, Strin
     Ok(path)
 }
 
-fn shown(path: &[u8]) -> String {
+pub fn shown(path: &[u8]) -> String {
     let s = String::from_utf8_lossy(path);
     if s.contains('\n') || s.contains('\u{fffd}') {
         format!("{s:?}")

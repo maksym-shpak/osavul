@@ -7,6 +7,7 @@ mod coverage_report;
 mod duplication_report;
 mod empty_rust_test;
 mod empty_test;
+mod gate;
 mod git_tree;
 mod lcov;
 mod local_tree;
@@ -57,6 +58,15 @@ osavul — статичний аналізатор коду
   osavul coverage --path <тека> --lcov <файл> [--lcov <файл>…] [--tests <шлях>…]
                       те саме для поточного вмісту теки; Git не потрібен
 
+  osavul gate <база> <ревізія>
+                      quality gate: чи не погіршилася ревізія відносно бази.
+                      Порівнює суми знахідок кожного правила check та
+                      duplicatedLines (ts-duplication) двох комітів; вміст бере
+                      лише з комітів, потрібен локальний Git; rustc потрібен
+                      лише коли відібрано файли .rs. Рядки умов:
+                      <умова>: пройдено|не пройдено: було <N>, стало <M>,
+                      після порушеної — місця; останній рядок gate: <стан>
+
 Опція --metric (лише в кінці виклику) обирає методику: cyclomatic (типово,
 ts-cyclomatic) cognitive (ts-cognitive) або loc (ts-loc, розмір коду: рядки з кодом без
 порожніх і коментарів); у записах файлів поле називається так само, як метрика.
@@ -70,6 +80,9 @@ ts-cyclomatic) cognitive (ts-cognitive) або loc (ts-loc, розмір код�
 2 — помилка аргументів, Git, шляху чи читання LCOV (stdout порожній).
 --tests — шляхи від кореня (ревізії чи теки), що є тестами й не входять у
 покриття; низьке покриття на код не впливає.
+Коди завершення gate: 0 — пройдено, 1 — не пройдено (stdout має вердикт і місця),
+2 — вердикт визначити неможливо: помилка аргументів, Git, ревізії чи будь-якого
+файла (stdout порожній, причини в stderr) або відмова запису.
 Коди завершення check: 0 — усі файли перевірено, знахідок немає, 1 — є знахідки,
 2 — помилка (має пріоритет). Помилка аргументів, шляху чи переліку теки: stdout
 порожній; помилка окремого файла: його знахідок немає, решта друкується, а
@@ -122,6 +135,7 @@ fn main() -> ExitCode {
             None => usage_error(),
         },
         [c, rest @ ..] if c == "coverage" => coverage(rest),
+        [c, base, rev] if c == "gate" && rev != "--path" => gate(base, rev),
         _ => usage_error(),
     }
 }
@@ -181,6 +195,34 @@ fn coverage(args: &[OsString]) -> ExitCode {
         match source.to_str() {
             Some(rev) => emit(coverage_report::measure(rev, &lcov, tests)),
             None => usage_error(),
+        }
+    }
+}
+
+/// Публікує вердикт gate: спершу діагностики, потім готовий буфер. Код 1 тут — це вердикт, а не
+/// неповнота, тому `emit` не підходить.
+fn gate(base: &OsString, rev: &OsString) -> ExitCode {
+    let (Some(base), Some(rev)) = (base.to_str(), rev.to_str()) else {
+        return usage_error();
+    };
+    match gate::compare_commits(base, rev) {
+        Ok(verdict) => {
+            let mut stdout = std::io::stdout().lock();
+            if let Err(e) = stdout
+                .write_all(&verdict.stdout)
+                .and_then(|()| stdout.flush())
+            {
+                let _ = writeln!(std::io::stderr(), "osavul: не вдалося записати звіт: {e}");
+                return ExitCode::from(2);
+            }
+            ExitCode::from(verdict.code)
+        }
+        Err(reasons) => {
+            let mut stderr = std::io::stderr();
+            for reason in reasons {
+                let _ = writeln!(stderr, "osavul: {reason}");
+            }
+            ExitCode::from(2)
         }
     }
 }
