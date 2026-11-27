@@ -59,10 +59,13 @@ osavul — статичний аналізатор коду
                       те саме для поточного вмісту теки; Git не потрібен
 
   osavul gate <база> <ревізія>
+  osavul gate <база> --path <тека>
                       quality gate: чи не погіршилася ревізія відносно бази.
                       Порівнює суми знахідок кожного правила check та
-                      duplicatedLines (ts-duplication) двох комітів; вміст бере
-                      лише з комітів, потрібен локальний Git; rustc потрібен
+                      duplicatedLines (ts-duplication) двох комітів; друга
+                      форма порівнює базу з поточним вмістом верхньої теки
+                      робочого дерева (відстежувані й невідстежувані неігноровані
+                      файли); потрібен локальний Git; rustc потрібен
                       лише коли відібрано файли .rs. Рядки умов:
                       <умова>: пройдено|не пройдено: було <N>, стало <M>,
                       після порушеної — місця; останній рядок gate: <стан>
@@ -135,7 +138,8 @@ fn main() -> ExitCode {
             None => usage_error(),
         },
         [c, rest @ ..] if c == "coverage" => coverage(rest),
-        [c, base, rev] if c == "gate" && rev != "--path" => gate(base, rev),
+        [c, base, flag, dir] if c == "gate" && flag == "--path" => gate(base, dir, true),
+        [c, base, rev] if c == "gate" && rev != "--path" => gate(base, rev, false),
         _ => usage_error(),
     }
 }
@@ -201,11 +205,16 @@ fn coverage(args: &[OsString]) -> ExitCode {
 
 /// Публікує вердикт gate: спершу діагностики, потім готовий буфер. Код 1 тут — це вердикт, а не
 /// неповнота, тому `emit` не підходить.
-fn gate(base: &OsString, rev: &OsString) -> ExitCode {
-    let (Some(base), Some(rev)) = (base.to_str(), rev.to_str()) else {
+fn gate(base: &OsString, target: &OsString, path_mode: bool) -> ExitCode {
+    let (Some(base), Some(target)) = (base.to_str(), target.to_str()) else {
         return usage_error();
     };
-    match gate::compare_commits(base, rev) {
+    let result = if path_mode {
+        gate::compare_worktree(base, target)
+    } else {
+        gate::compare_commits(base, target)
+    };
+    match result {
         Ok(verdict) => {
             let mut stderr = std::io::stderr();
             for warning in &verdict.warnings {

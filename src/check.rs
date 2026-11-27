@@ -117,6 +117,11 @@ pub fn render(findings: &mut [Finding]) -> Vec<u8> {
     out
 }
 
+/// Шлях знахідки в теці `arg`, як у `check` для теки.
+pub fn directory_path(arg: &str, key: &[u8]) -> Result<Vec<u8>, String> {
+    printed_path(arg, InputKind::Directory, key)
+}
+
 /// Шлях знахідки: для явного файла — дослівний аргумент, для теки — аргумент, `/` (якщо аргумент
 /// ще не закінчується роздільником) і ключ файла.
 fn printed_path(arg: &str, kind: InputKind, key: &[u8]) -> Result<Vec<u8>, String> {

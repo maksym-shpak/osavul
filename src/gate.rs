@@ -8,6 +8,7 @@ use crate::check::{self, Finding, Rule};
 use crate::complexity_report::FileInput;
 use crate::duplication_report::{self, Analysis};
 use crate::git_tree;
+use crate::local_tree;
 
 /// Готовий результат порівняння: повний stdout, код 0 або 1 і попередження про файли бази.
 pub struct Verdict {
@@ -24,6 +25,8 @@ struct Found {
 
 /// Усе, що відомо про один бік порівняння.
 struct Side {
+    /// Дослівний аргумент теки для подання шляхів у формі `--path`.
+    prefix: Option<String>,
     findings: Vec<Found>,
     dup_keys: Vec<Vec<u8>>,
     dup: Analysis,
@@ -32,26 +35,37 @@ struct Side {
 /// Вхідні дані одного боку до аналізу.
 struct Raw {
     label: &'static str,
-    inv: git_tree::GateInventory,
-    contents: Vec<Result<Vec<u8>, git_tree::ReadError>>,
+    keys: Vec<Vec<u8>>,
+    selections: Vec<git_tree::Selection>,
+    contents: Vec<Result<Vec<u8>, String>>,
+    prefix: Option<String>,
 }
 
 impl Raw {
     fn needs_rust(&self) -> bool {
         // Рішення залежить лише від відібраних ключів, а не від того, чи вдалося їх прочитати.
-        self.inv
-            .entries
+        self.keys
             .iter()
-            .zip(&self.inv.selections)
-            .any(|(e, s)| s.check && check::uses_rust(&e.path))
+            .zip(&self.selections)
+            .any(|(k, s)| s.check && check::uses_rust(k))
     }
 }
 
 /// Порівнює два коміти. `Err` — фатальна відмова: кожен елемент є рядком діагностики
 /// (попередження бази, якщо вони вже встановлені, ідуть першими).
 pub fn compare_commits(base: &str, rev: &str) -> Result<Verdict, Vec<String>> {
-    let base_raw = collect("база", base);
-    let target_raw = collect("ревізія", rev);
+    compare(collect("база", base), collect("ревізія", rev))
+}
+
+/// Порівнює коміт бази з поточним вмістом теки `dir` (верхня тека робочого дерева).
+pub fn compare_worktree(base: &str, dir: &str) -> Result<Verdict, Vec<String>> {
+    compare(collect("база", base), collect_worktree(dir))
+}
+
+fn compare(
+    base_raw: Result<Raw, String>,
+    target_raw: Result<Raw, String>,
+) -> Result<Verdict, Vec<String>> {
     let (base_raw, target_raw) = match (base_raw, target_raw) {
         (Ok(b), Ok(t)) => (b, t),
         (b, t) => {
@@ -84,18 +98,40 @@ pub fn compare_commits(base: &str, rev: &str) -> Result<Verdict, Vec<String>> {
         lines.extend(errors);
         return Err(lines);
     }
-    let mut verdict = compare(&base_side, &target_side);
+    let mut verdict = render_verdict(&base_side, &target_side);
     verdict.warnings = warnings;
     Ok(verdict)
 }
 
 fn collect(label: &'static str, rev: &str) -> Result<Raw, String> {
     let inv = git_tree::gate_inventory(rev).map_err(|e| format!("{label}: {e}"))?;
-    let contents = git_tree::read_contents(&inv.entries);
+    let contents = git_tree::read_contents(&inv.entries)
+        .into_iter()
+        .map(|r| r.map_err(|e| e.reason().to_string()))
+        .collect();
     Ok(Raw {
         label,
-        inv,
+        keys: inv.entries.into_iter().map(|e| e.path).collect(),
+        selections: inv.selections,
         contents,
+        prefix: None,
+    })
+}
+
+fn collect_worktree(dir: &str) -> Result<Raw, String> {
+    let inv = git_tree::worktree_inventory(std::path::Path::new(dir))
+        .map_err(|e| format!("ревізія: {e}"))?;
+    let contents = inv
+        .keys
+        .iter()
+        .map(|k| local_tree::read_key(&inv.root, k))
+        .collect();
+    Ok(Raw {
+        label: "ревізія",
+        keys: inv.keys,
+        selections: inv.selections,
+        contents,
+        prefix: Some(dir.to_string()),
     })
 }
 
@@ -130,11 +166,10 @@ fn analyze(
     let mut findings = Vec::new();
     let mut dup_keys = Vec::new();
     let mut dup_inputs = Vec::new();
-    let rows = raw.inv.entries.iter().zip(&raw.inv.selections);
-    for ((entry, selection), content) in rows.zip(&raw.contents) {
-        let key = &entry.path;
+    let rows = raw.keys.iter().zip(&raw.selections);
+    for ((key, selection), content) in rows.zip(&raw.contents) {
         // Для бази достатньо байтового ключа: неподатний шлях не заважає підрахунку.
-        if !is_base && let Err(reason) = check::commit_path(key) {
+        if !is_base && let Err(reason) = print_path(raw.prefix.as_deref(), key) {
             fail(key, false, reason);
         }
         if selection.check {
@@ -150,7 +185,7 @@ fn analyze(
                     }
                     Err(e) => fail(key, e.kind == check::FailureKind::Tool, e.reason),
                 },
-                Err(e) => fail(key, false, e.reason().to_string()),
+                Err(reason) => fail(key, false, reason.clone()),
             }
         }
         if selection.dup {
@@ -182,9 +217,24 @@ fn analyze(
         }
     }
     Side {
+        prefix: raw.prefix.clone(),
         findings,
         dup_keys,
         dup,
+    }
+}
+
+fn print_path(prefix: Option<&str>, key: &[u8]) -> Result<Vec<u8>, String> {
+    match prefix {
+        None => check::commit_path(key),
+        Some(arg) => check::directory_path(arg, key),
+    }
+}
+
+impl Side {
+    /// Подання шляху для виводу; шляхи цілі вже перевірено в `analyze`.
+    fn shown(&self, key: &[u8]) -> Vec<u8> {
+        print_path(self.prefix.as_deref(), key).unwrap_or_else(|_| key.to_vec())
     }
 }
 
@@ -196,7 +246,7 @@ fn state(violated: bool) -> &'static str {
     }
 }
 
-fn compare(base: &Side, target: &Side) -> Verdict {
+fn render_verdict(base: &Side, target: &Side) -> Verdict {
     let mut out = Vec::new();
     let mut failed = false;
 
@@ -263,7 +313,7 @@ fn rule_details(rule: &Rule, base: &Side, target: &Side) -> Vec<u8> {
         .filter(|f| f.rule.id == rule.id)
         .filter(|f| now[f.key.as_slice()] > was.get(f.key.as_slice()).copied().unwrap_or(0))
         .map(|f| Finding {
-            path: f.key.clone(),
+            path: target.shown(&f.key),
             line: f.line,
             rule: f.rule.id,
             message: f.rule.message,
@@ -300,7 +350,7 @@ fn duplication_details(base: &Side, target: &Side) -> Vec<u8> {
         }
         number += 1;
         for &(file, start, end) in group {
-            out.extend_from_slice(&target.dup_keys[file]);
+            out.extend_from_slice(&target.shown(&target.dup_keys[file]));
             out.extend_from_slice(
                 format!(":{start}-{end}: duplication: група {number}\n").as_bytes(),
             );
