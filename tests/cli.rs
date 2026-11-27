@@ -2510,7 +2510,6 @@ fn gate_rustc_crash_on_base_file_is_fatal() {
     assert!(stderr_of(&out).contains("rustc"), "{}", stderr_of(&out));
 }
 
-/// Без rustc кодування Rust-файлів усе одно перевіряється, і діагностика називає кожен файл.
 #[cfg(unix)]
 #[test]
 fn gate_without_rustc_still_reports_undecodable_rust_and_broken_files() {
@@ -2550,13 +2549,11 @@ fn gate_needs_rustc_only_when_rust_files_are_selected() {
     assert!(out.stdout.is_empty());
     assert!(stderr_of(&out).contains("rustc"), "{}", stderr_of(&out));
 
-    // За справного rustc виправлення синтаксису дає попередження бази й код за сумами.
     let out = gate(&repo, &repo.root, &base, &rev);
     assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
     assert!(stderr_of(&out).contains("lib.rs"));
 }
 
-/// Запуск `gate <база> --path <арг>` у теці `dir`.
 fn gate_path(repo: &Repo, dir: &Path, base: &str, arg: &str) -> Output {
     repo.run(dir, &["gate", base, "--path", arg])
 }
@@ -2912,7 +2909,6 @@ fn gate_path_does_not_run_fsmonitor_hook() {
     assert!(!marker.exists(), "gate виконав скрипт core.fsmonitor");
 }
 
-/// Кореневу теку з байтом поза UTF-8 в імені можна передати як `.` і як `../<ім'я>`.
 #[cfg(target_os = "linux")]
 #[test]
 fn gate_path_accepts_non_utf8_worktree_root_argument() {

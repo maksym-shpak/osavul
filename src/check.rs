@@ -14,14 +14,12 @@ pub enum Lang {
     TypeScript,
 }
 
-/// Категорія відмови детектора: проблема вхідного файла чи недоступність потрібного інструмента.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureKind {
     File,
     Tool,
 }
 
-/// Причина відмови детектора разом із категорією.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetectError {
     pub kind: FailureKind,

@@ -98,7 +98,6 @@ fn tree_entries(sha: &str) -> Result<Vec<Entry>, String> {
     parse_listing(&listing)
 }
 
-/// До яких умов gate входить запис коміту.
 #[derive(Debug, Clone, Copy)]
 pub struct Selection {
     pub check: bool,

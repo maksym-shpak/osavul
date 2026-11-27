@@ -23,7 +23,6 @@ struct Found {
     line: usize,
 }
 
-/// Усе, що відомо про один бік порівняння.
 struct Side {
     /// Дослівний аргумент теки для подання шляхів у формі `--path`.
     prefix: Option<Vec<u8>>,
@@ -32,7 +31,6 @@ struct Side {
     dup: Analysis,
 }
 
-/// Вхідні дані одного боку до аналізу.
 struct Raw {
     label: &'static str,
     keys: Vec<Vec<u8>>,
@@ -144,7 +142,6 @@ fn collect_worktree(dir: &std::ffi::OsStr) -> Result<Raw, String> {
     })
 }
 
-/// Причина відмови файла: помилка самого файла чи недоступність інструмента.
 struct Failure {
     tool: bool,
     reason: String,

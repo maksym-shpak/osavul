@@ -103,14 +103,12 @@ fn union_len(mut ranges: Vec<(usize, usize)>) -> u64 {
     total
 }
 
-/// Внесок успішно підготовленого файла.
 pub(crate) struct Contribution {
     pub lines: u64,
     pub duplicated_lines: u64,
     pub duplicated_blocks: u64,
 }
 
-/// Результат спільного пошуку дублів одного боку до серіалізації.
 pub(crate) struct Analysis {
     /// За порядком входу: внесок або причина відмови файла.
     pub files: Vec<Result<Contribution, &'static str>>,

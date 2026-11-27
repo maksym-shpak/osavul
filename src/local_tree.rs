@@ -46,7 +46,6 @@ impl Policy {
         self.suffixes.iter().any(|s| key.ends_with(s))
     }
 
-    /// Чи пропускається тека з цим іменем під час обходу вкладених тек.
     fn skips_dir(&self, name: &[u8]) -> bool {
         EXCLUDED.iter().any(|x| x.as_bytes() == name)
             || self.skip_nested_dirs.iter().any(|x| x.as_bytes() == name)
@@ -138,7 +137,6 @@ fn is_repository_dir(dir: &Path) -> bool {
             .is_ok_and(|o| o.status.success() && o.stdout.trim_ascii() == b"true")
 }
 
-/// Читає поточні байти файла за кореневим ключем.
 pub fn read_key(root: &Path, key: &[u8]) -> Result<Vec<u8>, String> {
     fs::read(root.join(path_from_bytes(key))).map_err(|e| format!("не вдалося прочитати: {e}"))
 }
