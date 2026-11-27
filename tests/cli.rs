@@ -42,7 +42,7 @@ fn help_is_stable_and_lists_all_invocations() {
     }
     let text = String::from_utf8(first.stdout.clone()).unwrap();
     assert!(text.contains("--help") && text.contains("--version"));
-    assert!(text.contains("check <файл.rs>"));
+    assert!(text.contains("check <файл-або-тека>"));
     assert!(text.contains("osavul complexity <ревізія>"));
     assert!(text.contains("osavul complexity --path <файл-або-тека>"));
     assert!(text.contains("Git не потрібен"));
@@ -139,6 +139,8 @@ fn temp_file(name: &str, content: &[u8]) -> PathBuf {
 }
 
 /// Повертає (код, stdout) і перевіряє порожній stderr для кодів 0 та 1.
+const MSG: &str = "тест порожній: напишіть перевірку в тілі тесту або видаліть його";
+
 fn check_src(name: &str, src: &str) -> (i32, String) {
     let path = temp_file(name, src.as_bytes());
     let p = path.to_str().unwrap();
@@ -161,7 +163,7 @@ fn assert_check_error(args: &[&str]) {
 // Виявляє хибні спрацювання чи пропуски правила на корпусі та відмінність двох запусків.
 #[test]
 fn corpus_matches_expected_tsv() {
-    let dir = "tests/fixtures/empty-rust-test";
+    let dir = "tests/fixtures/empty-test";
     let tsv = fs::read_to_string(format!("{dir}/expected.tsv")).unwrap();
     let mut rows = tsv.lines();
     assert_eq!(rows.next(), Some("path\tpair\tlines"));
@@ -173,7 +175,7 @@ fn corpus_matches_expected_tsv() {
             "[]" => (0, String::new()),
             l => (
                 1,
-                format!("{path}:{}: empty-rust-test\n", &l[1..l.len() - 1]),
+                format!("{path}:{}: empty-test: {MSG}\n", &l[1..l.len() - 1]),
             ),
         };
         let first = run(&["check", &path]);
@@ -185,21 +187,24 @@ fn corpus_matches_expected_tsv() {
         }
         count += 1;
     }
-    assert_eq!(count, 6);
+    assert_eq!(count, 10);
+    // Явний файл з чужим суфіксом — помилка, навіть якщо вміст є правильним Rust.
+    let foreign = temp_file("foreign.txt", b"#[test]\nfn a() {}\n");
+    assert_check_error(&["check", foreign.to_str().unwrap()]);
 }
 
 // Виявляє зміну порядку знахідок або номера рядка `fn` при CRLF і багаторядковому атрибуті.
 #[test]
 fn two_findings_in_order_with_crlf_and_multiline_attribute() {
     let src = "// c\r\n#[test]\r\nfn a() {}\r\n\r\n#[\r\n  test\r\n]\r\n/* x\r\n*/ pub(crate)\r\nfn b() { /* a /* nested */ b */ // t\r\n}\r\n";
-    let path = temp_file("any_name.txt", src.as_bytes());
+    let path = temp_file("any_name.rs", src.as_bytes());
     // Робочий каталог — тимчасовий, тож тест не залежить від розміщення CARGO_TARGET_DIR.
     let p = format!("./{}", path.file_name().unwrap().to_str().unwrap());
     let out = run_in(path.parent(), &["check", &p]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         out.stdout,
-        format!("{p}:3: empty-rust-test\n{p}:10: empty-rust-test\n").as_bytes()
+        format!("{p}:3: empty-test: {MSG}\n{p}:10: empty-test: {MSG}\n").as_bytes()
     );
     assert!(out.stderr.is_empty());
 }
@@ -208,7 +213,13 @@ fn two_findings_in_order_with_crlf_and_multiline_attribute() {
 #[test]
 fn bom_and_shebang_keep_physical_lines() {
     let (code, out) = check_src("bom.rs", "\u{feff}#!/usr/bin/env x\n#[test]\nfn a() {}\n");
-    assert_eq!((code, out.as_str()), (1, "P:3: empty-rust-test\n"));
+    assert_eq!(
+        (code, out.as_str()),
+        (
+            1,
+            "P:3: empty-test: тест порожній: напишіть перевірку в тілі тесту або видаліть його\n"
+        )
+    );
 }
 
 #[test]
@@ -219,7 +230,10 @@ fn embedded_modules_count_but_other_items_do_not() {
     let (code, out) = check_src("mods.rs", src);
     assert_eq!(
         (code, out.as_str()),
-        (1, "P:2: empty-rust-test\nP:7: empty-rust-test\n")
+        (
+            1,
+            "P:2: empty-test: тест порожній: напишіть перевірку в тілі тесту або видаліть його\nP:7: empty-test: тест порожній: напишіть перевірку в тілі тесту або видаліть його\n"
+        )
     );
 }
 
@@ -264,20 +278,38 @@ fn signature_macros_and_unicode_names_and_multiline_inner_attribute() {
         ("#[test]\nfn a() -> unit! {} { helper() }", (0, "")),
         (
             "#[test]\nfn a() -> as_type! { () } {}",
-            (1, "P:2: empty-rust-test\n"),
+            (
+                1,
+                "P:2: empty-test: тест порожній: напишіть перевірку в тілі тесту або видаліть його\n",
+            ),
         ),
-        ("#[test]\nfn a() -> ! {}", (1, "P:2: empty-rust-test\n")),
+        (
+            "#[test]\nfn a() -> ! {}",
+            (
+                1,
+                "P:2: empty-test: тест порожній: напишіть перевірку в тілі тесту або видаліть його\n",
+            ),
+        ),
         (
             "mod परीक्षा {\n#[test]\nfn a() {}\n}",
-            (1, "P:3: empty-rust-test\n"),
+            (
+                1,
+                "P:3: empty-test: тест порожній: напишіть перевірку в тілі тесту або видаліть його\n",
+            ),
         ),
         (
             "#!\n[allow(dead_code)]\n#[test]\nfn a() {}\n",
-            (1, "P:4: empty-rust-test\n"),
+            (
+                1,
+                "P:4: empty-test: тест порожній: напишіть перевірку в тілі тесту або видаліть його\n",
+            ),
         ),
         (
             "#! /* c */\n// d\n[allow(dead_code)]\n#[test]\nfn a() {}\n",
-            (1, "P:5: empty-rust-test\n"),
+            (
+                1,
+                "P:5: empty-test: тест порожній: напишіть перевірку в тілі тесту або видаліть його\n",
+            ),
         ),
     ];
     for (src, (code, out)) in cases {
@@ -301,7 +333,11 @@ fn external_module_and_unexpanded_macro_need_nothing_else() {
         "mod missing;\ncompile_error!(\"no\");\nfn typed() -> u8 { \"x\" }\n#[test]\nfn a() {}\n";
     assert_eq!(
         check_src("ext.rs", src),
-        (1, "P:5: empty-rust-test\n".into())
+        (
+            1,
+            "P:5: empty-test: тест порожній: напишіть перевірку в тілі тесту або видаліть його\n"
+                .into()
+        )
     );
 }
 
@@ -1756,4 +1792,297 @@ fn coverage_bare_repository_resolves_sf_against_git_dir() {
     let v = json_of(&out);
     assert_eq!(v["files"][0]["inReport"], true);
     assert_eq!(v["files"][0]["linesToCover"], 4);
+}
+
+// --- `check` на теках: інвентар, шляхи, часткові результати ---
+
+fn write_at(root: &Path, rel: &str, body: &str) {
+    let p = root.join(rel);
+    fs::create_dir_all(p.parent().unwrap()).unwrap();
+    fs::write(p, body).unwrap();
+}
+
+const EMPTY: &str = "#[test]\nfn a() {}\n";
+
+// Виявляє хибне написання шляху теки, порядок за байтами шляху та пропуск вкладених тек.
+#[test]
+fn directory_report_uses_argument_spelling_order_and_skips_excluded() {
+    let dir = local_dir("check-dir");
+    write_at(&dir, "b.rs", EMPTY);
+    write_at(&dir, "a/z.rs", &format!("\n\n{EMPTY}{EMPTY}"));
+    write_at(&dir, "a.rs", EMPTY);
+    write_at(&dir, "target/t.rs", EMPTY);
+    write_at(&dir, "x/node_modules/n.rs", EMPTY);
+    write_at(&dir, "notes.txt", "not rust (");
+    for arg in [".", "./"] {
+        let first = run_in(Some(&dir), &["check", arg]);
+        let second = run_in(Some(&dir), &["check", arg]);
+        assert_eq!(first.stdout, second.stdout);
+        assert_eq!(first.status.code(), Some(1));
+        assert!(first.stderr.is_empty());
+        let text = String::from_utf8(first.stdout).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        let prefix = "./";
+        assert_eq!(lines.len(), 4, "{text}");
+        assert!(lines[0].starts_with(&format!("{prefix}a.rs:2: empty-test: ")));
+        assert!(lines[1].starts_with(&format!("{prefix}a/z.rs:")));
+        assert!(lines[3].starts_with(&format!("{prefix}b.rs:2: ")));
+        assert!(text.ends_with(&format!("{MSG}\n")));
+        assert!(!text.contains("target") && !text.contains("node_modules"));
+    }
+}
+
+#[test]
+fn directory_without_supported_files_is_clean_and_missing_path_is_error() {
+    let dir = local_dir("check-empty");
+    write_at(&dir, "readme.txt", "x");
+    let out = run_in(Some(&dir), &["check", "."]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stdout.is_empty() && out.stderr.is_empty());
+    assert_check_error(&["check", dir.join("missing").to_str().unwrap()]);
+}
+
+#[test]
+fn broken_file_is_reported_while_neighbour_findings_are_printed() {
+    let dir = local_dir("check-partial");
+    write_at(
+        &dir,
+        "a_broken.rs",
+        "#[test]\nfn a() {}\nfn b() { let x = (1 +); }\n",
+    );
+    write_at(&dir, "b_good.rs", EMPTY);
+    let out = run_in(Some(&dir), &["check", "."]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        format!("./b_good.rs:2: empty-test: {MSG}\n")
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("./a_broken.rs"), "{stderr}");
+    assert!(!stderr.contains("b_good"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn unreadable_file_is_reported_and_neighbours_still_checked() {
+    let dir = local_dir("check-denied");
+    write_at(&dir, "a.rs", EMPTY);
+    write_at(&dir, "b.rs", EMPTY);
+    // Потрібен справжній rustc у PATH для b.rs, тож запуск не звужується до іншого користувача;
+    // від root заборона читання не діє, тож тест там нічого не доводить і пропускається.
+    if is_root() {
+        return;
+    }
+    let _denied = ReadDenied::new(&dir.join("a.rs"));
+    let out = run_in(Some(&dir), &["check", "."]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        format!("./b.rs:2: empty-test: {MSG}\n")
+    );
+    assert!(String::from_utf8(out.stderr).unwrap().contains("./a.rs"));
+}
+
+// Для `.rs` потрібен rustc: без нього файл — помилка (код 2), а теку без `.rs` він не зачіпає.
+#[test]
+fn missing_rustc_fails_rust_files_only() {
+    let dir = local_dir("check-norustc");
+    write_at(&dir, "a.rs", EMPTY);
+    let out = local_run(&dir, &["check", "a.rs"], false);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    assert!(String::from_utf8(out.stderr).unwrap().contains("a.rs"));
+}
+
+#[cfg(unix)]
+#[test]
+fn directory_with_unprintable_nested_name_fails_only_that_file() {
+    let dir = local_dir("check-lf");
+    write_at(&dir, "a\nb.rs", EMPTY);
+    write_at(&dir, "c.rs", EMPTY);
+    let out = run_in(Some(&dir), &["check", "."]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        format!("./c.rs:2: empty-test: {MSG}\n")
+    );
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("\"./a\\nb.rs\""), "{err}");
+    assert!(err.contains("один запис"), "{err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn nested_non_utf8_name_is_printed_as_raw_bytes() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = local_dir("check-raw");
+    let name = std::ffi::OsStr::from_bytes(b"\xff.rs");
+    fs::write(dir.join(name), EMPTY).unwrap();
+    let out = run_in(Some(&dir), &["check", "."]);
+    assert_eq!(out.status.code(), Some(1));
+    let mut expected = b"./\xff.rs:2: empty-test: ".to_vec();
+    expected.extend_from_slice(format!("{MSG}\n").as_bytes());
+    assert_eq!(out.stdout, expected);
+}
+
+#[test]
+fn check_stdout_write_failure_is_fatal() {
+    let path = temp_file("pipe.rs", EMPTY.as_bytes());
+    let p = path.to_str().unwrap();
+    let ok = run(&["check", p]);
+    assert_eq!(ok.status.code(), Some(1));
+    assert!(!ok.stdout.is_empty());
+
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
+    cmd.args(["check", p]).stdout(writer);
+    let out = cmd.output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("не вдалося записати звіт"), "{stderr}");
+}
+
+// Виявляє зсув позицій чи форматів між мовами: змішана тека, обидва написання кореня, порядок,
+// кратність на одному рядку й байтова повторюваність.
+#[test]
+fn mixed_directory_prints_both_languages_in_order() {
+    let dir = local_dir("check-mixed");
+    write_at(
+        &dir,
+        "b.ts",
+        "it('a', () => {});\nit('b', () => {}); test('c', () => {});\n",
+    );
+    write_at(&dir, "a.rs", &format!("\n\n{EMPTY}{EMPTY}"));
+    write_at(&dir, "types.d.ts", "declare function f(): void;\n");
+    write_at(&dir, "target/t.ts", "it('a', () => {});\n");
+    write_at(&dir, "z/node_modules/n.ts", "it('a', () => {});\n");
+    write_at(&dir, "n.txt", "it('a', () => {});\n");
+    let sibling = format!("../{}", dir.file_name().unwrap().to_str().unwrap());
+    let sibling_prefix = format!("{sibling}/");
+    for (arg, prefix) in [
+        (".", "./"),
+        ("./", "./"),
+        (sibling.as_str(), sibling_prefix.as_str()),
+    ] {
+        let first = run_in(Some(&dir), &["check", arg]);
+        let second = run_in(Some(&dir), &["check", arg]);
+        assert_eq!(first.stdout, second.stdout);
+        assert_eq!(first.status.code(), Some(1));
+        assert!(first.stderr.is_empty());
+        let expected = format!(
+            "{prefix}a.rs:4: empty-test: {MSG}\n{prefix}a.rs:6: empty-test: {MSG}\n\
+             {prefix}b.ts:1: empty-test: {MSG}\n{prefix}b.ts:2: empty-test: {MSG}\n\
+             {prefix}b.ts:2: empty-test: {MSG}\n"
+        );
+        assert_eq!(String::from_utf8(first.stdout).unwrap(), expected, "{arg}");
+    }
+    let out = run_in(Some(&dir), &["check", "./b.ts"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        out.stdout
+            .starts_with(format!("./b.ts:1: empty-test: {MSG}\n").as_bytes())
+    );
+}
+
+// Виявляє часткову перевірку TypeScript: пізня діагностика відкидає й раніші знахідки файла.
+#[test]
+fn broken_typescript_is_rejected_whole_while_neighbour_is_printed() {
+    let dir = local_dir("check-ts-partial");
+    write_at(&dir, "a_broken.ts", "it('a', () => {});\nlet x = ;\n");
+    write_at(&dir, "b_good.ts", "it('a', () => {});\n");
+    let out = local_run(&dir, &["check", "."], false);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        format!("./b_good.ts:1: empty-test: {MSG}\n")
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("./a_broken.ts") && stderr.contains("syntax-error"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("b_good"), "{stderr}");
+    let single = run_in(Some(&dir), &["check", "a_broken.ts"]);
+    assert_eq!(single.status.code(), Some(2));
+    assert!(single.stdout.is_empty());
+}
+
+#[test]
+fn declaration_file_is_accepted() {
+    let dir = local_dir("check-dts");
+    write_at(&dir, "a.d.ts", "declare function f(): void;\n");
+    let out = run_in(Some(&dir), &["check", "a.d.ts"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stdout.is_empty() && out.stderr.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn unreadable_typescript_keeps_neighbour_result() {
+    if is_root() {
+        return;
+    }
+    let dir = local_dir("check-ts-denied");
+    write_at(&dir, "a.ts", "it('a', () => {});\n");
+    write_at(&dir, "b.ts", "it('a', () => {});\n");
+    let _denied = ReadDenied::new(&dir.join("a.ts"));
+    let out = local_run(&dir, &["check", "."], false);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        format!("./b.ts:1: empty-test: {MSG}\n")
+    );
+    assert!(String::from_utf8(out.stderr).unwrap().contains("./a.ts"));
+}
+
+// TypeScript не потребує rustc (порожній PATH, без Git); щойно відібрано `.rs` — помилка файла.
+#[test]
+fn rustc_is_needed_only_when_rust_files_are_selected() {
+    let dir = local_dir("check-ts-norustc");
+    write_at(&dir, "a.ts", "it('a', () => {});\n");
+    let ts_only = local_run(&dir, &["check", "."], false);
+    assert_eq!(ts_only.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(ts_only.stdout.clone()).unwrap(),
+        format!("./a.ts:1: empty-test: {MSG}\n")
+    );
+    assert!(ts_only.stderr.is_empty());
+    write_at(&dir, "b.rs", EMPTY);
+    let both = local_run(&dir, &["check", "."], false);
+    assert_eq!(both.status.code(), Some(2));
+    assert_eq!(both.stdout, ts_only.stdout);
+    assert!(String::from_utf8(both.stderr).unwrap().contains("./b.rs"));
+}
+
+#[test]
+fn corpus_checker_accepts_full_corpus_and_detects_missing_file() {
+    let tmp =
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("corpus-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+    let bin = tmp.join("check_corpus");
+    let built = Command::new("rustc")
+        .args(["tests/fixtures/check_corpus.rs", "-o"])
+        .arg(&bin)
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let corpus = "tests/fixtures/empty-test";
+    assert!(Command::new(&bin).arg(corpus).status().unwrap().success());
+    let copy = tmp.join("copy");
+    fs::create_dir_all(&copy).unwrap();
+    for e in fs::read_dir(corpus).unwrap() {
+        let e = e.unwrap();
+        if e.file_name() != "ts_comment_only_clean.ts" {
+            fs::copy(e.path(), copy.join(e.file_name())).unwrap();
+        }
+    }
+    let out = Command::new(&bin).arg(&copy).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("ts_comment_only_clean.ts"));
 }

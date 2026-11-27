@@ -1,10 +1,12 @@
 //! Точка входу CLI: розбирає аргументи, передає роботу модулям аналізу та перетворює результат на
 //! вивід і код виходу. Саму аналітику й читання джерел модуль не виконує.
 
+mod check;
 mod complexity_report;
 mod coverage_report;
 mod duplication_report;
 mod empty_rust_test;
+mod empty_test;
 mod git_tree;
 mod lcov;
 mod local_tree;
@@ -28,8 +30,12 @@ osavul — статичний аналізатор коду
 Використання:
   osavul --help       показати цю довідку
   osavul --version    показати назву й версію
-  osavul check <файл.rs>
-                      знайти порожні Rust-тести (правило empty-rust-test)
+  osavul check <файл-або-тека>
+                      знайти порожні тести (правило empty-test) у поточному
+                      вмісті файла .ts (і .d.ts), .rs чи теки на диску (рекурсивно, без
+                      .git, node_modules і вкладених target); потрібен
+                      локальний rustc, лише якщо відібрано файли .rs; файл
+                      з іншим суфіксом — помилка
   osavul complexity <ревізія> [--metric <cyclomatic|cognitive|loc>]
                       складність файлів .ts коміту (JSON у stdout);
                       вміст береться з коміту, потрібен локальний Git і запуск
@@ -64,7 +70,10 @@ ts-cyclomatic) cognitive (ts-cognitive) або loc (ts-loc, розмір код�
 2 — помилка аргументів, Git, шляху чи читання LCOV (stdout порожній).
 --tests — шляхи від кореня (ревізії чи теки), що є тестами й не входять у
 покриття; низьке покриття на код не впливає.
-Коди завершення check: 0 — знахідок немає, 1 — є знахідки, 2 — помилка.
+Коди завершення check: 0 — усі файли перевірено, знахідок немає, 1 — є знахідки,
+2 — помилка (має пріоритет). Помилка аргументів, шляху чи переліку теки: stdout
+порожній; помилка окремого файла: його знахідок немає, решта друкується, а
+шлях і причина йдуть у stderr. Запис: <шлях>:<рядок>: empty-test: <повідомлення>.
 ";
 
 fn main() -> ExitCode {
@@ -80,7 +89,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         [c, path] if c == "check" => match path.to_str() {
-            Some(path) => check(path),
+            Some(path) => check::run(path),
             None => usage_error(),
         },
         [c, flag, path] if c == "complexity" && flag == "--path" => emit(
@@ -199,30 +208,6 @@ fn emit(result: Result<complexity_report::Report, String>) -> ExitCode {
                 return ExitCode::from(2);
             }
             ExitCode::from(u8::from(!report.complete))
-        }
-        Err(reason) => {
-            let _ = writeln!(std::io::stderr(), "osavul: {reason}");
-            ExitCode::from(2)
-        }
-    }
-}
-
-/// Виконує `osavul check`: знахідки йдуть у `stdout` рядками `<шлях>:<рядок>: empty-rust-test`.
-/// Код виходу 0 — знахідок немає, 1 — є, 2 — файл не прочитано або не розібрано.
-fn check(path: &str) -> ExitCode {
-    let result = std::fs::read_to_string(path)
-        .map_err(|e| format!("не вдалося прочитати {path}: {e}"))
-        .and_then(|text| {
-            empty_rust_test::find_empty_tests(&text).map_err(|e| format!("{path}: {e}"))
-        });
-    match result {
-        Ok(lines) => {
-            let mut report = String::new();
-            for line in &lines {
-                report.push_str(&format!("{path}:{line}: empty-rust-test\n"));
-            }
-            let _ = std::io::stdout().write_all(report.as_bytes());
-            ExitCode::from(u8::from(!lines.is_empty()))
         }
         Err(reason) => {
             let _ = writeln!(std::io::stderr(), "osavul: {reason}");

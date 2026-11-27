@@ -22,7 +22,40 @@ pub struct Selected {
     pub disk: PathBuf,
 }
 
-const SUFFIX: &[u8] = b".ts";
+/// Політика відбору викликача: суфікси файлів (з урахуванням регістру) і теки, які пропускаються
+/// лише коли вкладені; на явний корінь ці пропуски не діють.
+pub struct Policy {
+    pub suffixes: &'static [&'static [u8]],
+    pub skip_nested_dirs: &'static [&'static str],
+}
+
+pub const METRICS: Policy = Policy {
+    suffixes: &[b".ts"],
+    skip_nested_dirs: &[],
+};
+
+/// Політика `check`: суфікси мов, які підтримують правила (`.ts` і `.rs`), вкладені теки
+/// `target` пропускаються.
+pub const CHECK: Policy = Policy {
+    suffixes: &[b".ts", b".rs"],
+    skip_nested_dirs: &["target"],
+};
+
+impl Policy {
+    fn accepts(&self, key: &[u8]) -> bool {
+        self.suffixes.iter().any(|s| key.ends_with(s))
+    }
+
+    fn describe(&self) -> String {
+        let list: Vec<String> = self
+            .suffixes
+            .iter()
+            .map(|s| String::from_utf8_lossy(s).into_owned())
+            .collect();
+        list.join(", ")
+    }
+}
+
 /// Імена, які обхід пропускає на будь-якій глибині; на сам корінь це не поширюється.
 const EXCLUDED: [&str; 2] = [".git", "node_modules"];
 
@@ -40,10 +73,10 @@ fn os_bytes(s: &std::ffi::OsStr) -> Vec<u8> {
 ///
 /// Явно вказаний корінь розіменовується, тож символьне посилання на файл чи теку працює як ціль.
 /// Під час обходу теки символьні посилання пропускаються, а записи `.git` і `node_modules` не
-/// беруться до уваги. Відбираються звичайні файли з суфіксом `.ts`, зокрема `.d.ts` і `.test.ts`.
+/// беруться до уваги. Відбираються звичайні файли з суфіксом із політики, зокрема `.d.ts` і `.test.ts`.
 /// Результат відсортований за байтами повного ключа, а не за компонентами шляху: `a.b/y.ts` <
-/// `a.ts` < `a/z.ts`. Корінь-файл без суфікса `.ts` також дає `Err`.
-pub fn select(root: &Path) -> Result<(InputKind, Vec<Selected>), String> {
+/// `a.ts` < `a/z.ts`. Корінь-файл без дозволеного суфікса також дає `Err`.
+pub fn select(root: &Path, policy: &Policy) -> Result<(InputKind, Vec<Selected>), String> {
     let meta = fs::metadata(root)
         .map_err(|e| format!("не вдалося визначити тип {}: {e}", root.display()))?;
     if meta.is_file() {
@@ -51,8 +84,12 @@ pub fn select(root: &Path) -> Result<(InputKind, Vec<Selected>), String> {
             .file_name()
             .ok_or_else(|| format!("{}: немає імені файла", root.display()))?;
         let key = os_bytes(name);
-        if !key.ends_with(SUFFIX) {
-            return Err(format!("{}: підтримується лише суфікс .ts", root.display()));
+        if !policy.accepts(&key) {
+            return Err(format!(
+                "{}: підтримуються лише суфікси {}",
+                root.display(),
+                policy.describe()
+            ));
         }
         return Ok((
             InputKind::File,
@@ -82,9 +119,12 @@ pub fn select(root: &Path) -> Result<(InputKind, Vec<Selected>), String> {
             let mut key = prefix.clone();
             key.extend(os_bytes(&name));
             if ty.is_dir() {
+                if policy.skip_nested_dirs.iter().any(|x| name == *x) {
+                    continue;
+                }
                 key.push(b'/');
                 stack.push((entry.path(), key));
-            } else if ty.is_file() && key.ends_with(SUFFIX) {
+            } else if ty.is_file() && policy.accepts(&key) {
                 found.push(Selected {
                     key,
                     disk: entry.path(),
@@ -98,7 +138,7 @@ pub fn select(root: &Path) -> Result<(InputKind, Vec<Selected>), String> {
 
 /// Відбирає й читає файли; відмова читання зберігається при ключі свого файла.
 pub fn collect(root: &Path) -> Result<(InputKind, Vec<FileInput>), String> {
-    let (kind, selected) = select(root)?;
+    let (kind, selected) = select(root, &METRICS)?;
     let files = selected
         .into_iter()
         .map(|s| FileInput {
@@ -127,7 +167,11 @@ mod tests {
     }
 
     fn keys(root: &Path) -> Vec<String> {
-        select(root)
+        keys_with(root, &METRICS)
+    }
+
+    fn keys_with(root: &Path, policy: &Policy) -> Vec<String> {
+        select(root, policy)
             .unwrap()
             .1
             .into_iter()
@@ -156,6 +200,11 @@ mod tests {
             "c.tsx",
             "d.mts",
             "real/inner.ts",
+            "target/a.ts",
+            "x.rs",
+            "target/b.rs",
+            "deep/target/c.rs",
+            "X.RS",
         ] {
             touch(&root, rel);
         }
@@ -171,9 +220,32 @@ mod tests {
                 "ign/ored.ts",
                 "real/inner.ts",
                 "src/x.test.ts",
+                "target/a.ts",
                 "types.d.ts"
             ]
         );
+        // Політика з обома суфіксами, як у `check` після додавання TypeScript: вкладені `target`
+        // пропущені, регістр суфікса значущий.
+        let both = Policy {
+            suffixes: &[b".ts", b".rs"],
+            skip_nested_dirs: CHECK.skip_nested_dirs,
+        };
+        assert_eq!(
+            keys_with(&root, &both),
+            [
+                "a.b/y.ts",
+                "a.ts",
+                "a/z.ts",
+                "b.ts",
+                "ign/ored.ts",
+                "real/inner.ts",
+                "src/x.test.ts",
+                "types.d.ts",
+                "x.rs"
+            ]
+        );
+        // Явний корінь `target` не пропускається.
+        assert_eq!(keys_with(&root.join("target"), &both), ["a.ts", "b.rs"]);
     }
 
     // Фізичні посилання потребують POSIX API (на Windows їх створення може вимагати прав).
@@ -202,12 +274,12 @@ mod tests {
         symlink("real/a.ts", root.join("alias.ts")).unwrap();
         symlink("real/a.ts", root.join("alias.txt")).unwrap();
         assert_eq!(keys(&root.join("dirlink")), ["a.ts"]);
-        let (kind, sel) = select(&root.join("alias.ts")).unwrap();
+        let (kind, sel) = select(&root.join("alias.ts"), &METRICS).unwrap();
         assert_eq!(
             (kind, sel[0].key.as_slice()),
             (InputKind::File, &b"alias.ts"[..])
         );
-        assert!(select(&root.join("alias.txt")).is_err());
+        assert!(select(&root.join("alias.txt"), &METRICS).is_err());
         assert_eq!(keys(&root.join("bad.ts")), ["bad.ts"]);
     }
 
@@ -215,7 +287,12 @@ mod tests {
     fn missing_root_and_unsupported_file_are_fatal() {
         let root = tree("fatal");
         touch(&root, "a.txt");
-        assert!(select(&root.join("none.ts")).is_err());
-        assert!(select(&root.join("a.txt")).is_err());
+        for policy in [&METRICS, &CHECK] {
+            assert!(select(&root.join("none.ts"), policy).is_err());
+            assert!(select(&root.join("a.txt"), policy).is_err());
+        }
+        touch(&root, "r.rs");
+        assert!(select(&root.join("r.rs"), &METRICS).is_err());
+        assert!(select(&root.join("r.rs"), &CHECK).is_ok());
     }
 }

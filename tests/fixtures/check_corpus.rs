@@ -1,11 +1,25 @@
 //! Структурний перевірник корпусу. Використання: check_corpus <каталог корпусу>
-//! Лише стандартна бібліотека. Номер рядка `fn` і зміст тіла звіряють вручну.
+//! Лише стандартна бібліотека. Номер рядка (`fn` для Rust, ідентифікатор виклику для TypeScript) і зміст звіряють вручну.
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::process::exit;
 
-const PAIRS: [&str; 3] = ["empty-body", "comment-only", "no-test-attr"];
+const PAIRS: [&str; 5] = [
+    "empty-body",
+    "comment-only",
+    "no-test-attr",
+    "ts-direct-call",
+    "ts-comment-only",
+];
+
+fn is_source(p: &Path) -> bool {
+    p.extension().map_or(false, |x| x == "rs" || x == "ts")
+}
+
+fn lang(path: &str) -> &'static str {
+    if path.ends_with(".ts") { "ts" } else { "rs" }
+}
 
 fn collect(root: &Path, dir: &Path, out: &mut BTreeSet<String>) -> Result<(), String> {
     let rd = fs::read_dir(dir).map_err(|e| format!("не вдалося прочитати каталог {}: {e}", dir.display()))?;
@@ -13,7 +27,7 @@ fn collect(root: &Path, dir: &Path, out: &mut BTreeSet<String>) -> Result<(), St
         let p = entry.map_err(|e| e.to_string())?.path();
         if p.is_dir() {
             collect(root, &p, out)?;
-        } else if p.extension().map_or(false, |x| x == "rs") {
+        } else if is_source(&p) {
             let rel = p.strip_prefix(root).unwrap();
             let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
             out.insert(parts.join("/"));
@@ -101,6 +115,10 @@ fn run(root: &Path) -> Vec<String> {
             None => errs.push(format!("пара {pair}: відсутня")),
             Some(v) => {
                 let found = v.iter().filter(|(_, l)| l.is_some()).count();
+                let same_lang = v.iter().all(|(p, _)| lang(p) == lang(v[0].0));
+                if !same_lang {
+                    errs.push(format!("пара {pair}: файли пари мають різні мови"));
+                }
                 if v.len() != 2 || found != 1 {
                     errs.push(format!(
                         "пара {pair}: потрібні два записи — один [N] і один [], а є {} записів, з них {found} зі знахідкою",
