@@ -219,9 +219,15 @@ fn gate(base: &OsString, target: &OsString, path_mode: bool) -> ExitCode {
     };
     match result {
         Ok(verdict) => {
+            // Діагностики мають бути доставлені до публікації вердикту.
             let mut stderr = std::io::stderr();
             for warning in &verdict.warnings {
-                let _ = writeln!(stderr, "osavul: {warning}");
+                if writeln!(stderr, "osavul: {warning}").is_err() {
+                    return ExitCode::from(2);
+                }
+            }
+            if stderr.flush().is_err() {
+                return ExitCode::from(2);
             }
             let mut stdout = std::io::stdout().lock();
             if let Err(e) = stdout

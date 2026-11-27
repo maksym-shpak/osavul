@@ -2391,6 +2391,28 @@ fn gate_fixing_broken_base_file_passes_with_base_warning() {
     assert_eq!(gate(&repo, &repo.root, &rev, &base).status.code(), Some(2));
 }
 
+#[cfg(unix)]
+#[test]
+fn gate_base_warning_write_failure_is_fatal() {
+    let repo = Repo::new("gate-warn-full");
+    repo.write("broken.ts", b"function (");
+    repo.write("ok.test.ts", FULL_TS.as_bytes());
+    let base = repo.commit("base");
+    repo.write("broken.ts", b"function f() {}\n");
+    let rev = repo.commit("fix");
+    let control = gate(&repo, &repo.root, &base, &rev);
+    assert_eq!(control.status.code(), Some(0), "{}", stderr_of(&control));
+    assert!(stderr_of(&control).contains("broken.ts"));
+
+    let full = fs::OpenOptions::new().write(true).open("/dev/full").unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
+    cmd.args(["gate", &base, &rev]).current_dir(&repo.root).stderr(full);
+    isolate(&mut cmd, &repo.home);
+    let out = cmd.output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+}
+
 #[test]
 fn gate_partial_base_keeps_known_duplication_sum() {
     let repo = Repo::new("gate-partial-base");
@@ -2689,6 +2711,22 @@ fn gate_path_skips_nested_repositories_gitlinks_and_materialized_links() {
     let out = gate_path(&repo, &repo.root, &base, ".");
     assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
     assert!(stdout_of(&out).starts_with("empty-test: пройдено: було 0, стало 0\n"));
+}
+
+#[test]
+fn gate_path_keeps_ordinary_fixture_shaped_like_git_layout() {
+    let repo = Repo::new("gate-path-fixture-layout");
+    repo.write("ok.test.ts", FULL_TS.as_bytes());
+    let base = repo.commit("base");
+    repo.write("fx/HEAD", b"fixture\n");
+    repo.write("fx/objects/o.txt", b"o\n");
+    repo.write("fx/refs/r.txt", b"r\n");
+    repo.write("fx/parser.test.ts", EMPTY_TS.as_bytes());
+    let out = gate_path(&repo, &repo.root, &base, ".");
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert!(text.contains("empty-test: не пройдено: було 0, стало 1\n"), "{text}");
+    assert!(text.contains(&format!("./fx/parser.test.ts:2: empty-test: {MSG}\n")), "{text}");
 }
 
 #[cfg(unix)]

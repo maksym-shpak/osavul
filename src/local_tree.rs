@@ -117,13 +117,25 @@ pub fn is_plain_file(root: &Path, key: &[u8]) -> bool {
     false
 }
 
-/// Тека є межею репозиторію: має запис `.git` або сама є bare-репозиторієм (`HEAD`, `objects/`,
-/// `refs/` — ті самі ознаки, за якими Git розпізнає теку репозиторію).
+/// Тека є межею репозиторію: має запис `.git` або сама є bare-репозиторієм. Збіг імен `HEAD`,
+/// `objects/`, `refs/` лише добирає кандидата: звичайна фікстура з такою структурою всередині
+/// робочого дерева не є межею, тож фактичну природу підтверджує сам Git.
 fn is_repository_dir(dir: &Path) -> bool {
-    fs::symlink_metadata(dir.join(".git")).is_ok()
-        || (fs::metadata(dir.join("HEAD")).is_ok_and(|m| m.is_file())
-            && fs::metadata(dir.join("objects")).is_ok_and(|m| m.is_dir())
-            && fs::metadata(dir.join("refs")).is_ok_and(|m| m.is_dir()))
+    if fs::symlink_metadata(dir.join(".git")).is_ok() {
+        return true;
+    }
+    let looks_bare = fs::metadata(dir.join("HEAD")).is_ok_and(|m| m.is_file())
+        && fs::metadata(dir.join("objects")).is_ok_and(|m| m.is_dir())
+        && fs::metadata(dir.join("refs")).is_ok_and(|m| m.is_dir());
+    looks_bare
+        && std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["rev-parse", "--is-bare-repository"])
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .output()
+            .is_ok_and(|o| o.status.success() && o.stdout.trim_ascii() == b"true")
 }
 
 /// Читає поточні байти файла за кореневим ключем.
