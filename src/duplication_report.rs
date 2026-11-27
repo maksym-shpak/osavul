@@ -103,15 +103,29 @@ fn union_len(mut ranges: Vec<(usize, usize)>) -> u64 {
     total
 }
 
-/// Будує звіт із готових даних. Порядок `files` збігається з порядком входу.
-///
-/// Файл, який не вдалося прочитати чи розібрати, дістає `null` у числах і причину в `error`, а
-/// `complete` і `total` стають `false` та `null`. Решта файлів однаково беруть участь у пошуку
-/// дублів.
-pub fn build(origin: Origin<'_>, files: Vec<FileInput>) -> Report {
-    let (sha, input) = origin.fields();
+/// Внесок успішно підготовленого файла.
+pub(crate) struct Contribution {
+    pub lines: u64,
+    pub duplicated_lines: u64,
+    pub duplicated_blocks: u64,
+}
 
-    // Результат підготовки або причина помилки при кожному шляху.
+/// Результат спільного пошуку дублів одного боку до серіалізації.
+pub(crate) struct Analysis {
+    /// За порядком входу: внесок або причина відмови файла.
+    pub files: Vec<Result<Contribution, &'static str>>,
+    /// Групи з однобазовими включними межами `(індекс файла, початок, кінець)` у канонічному
+    /// порядку: входження за байтами шляху й межами, групи за послідовністю входжень.
+    pub groups: Vec<Vec<(usize, usize, usize)>>,
+    pub lines: u64,
+    pub duplicated_lines: u64,
+    pub duplicated_blocks: u64,
+    pub duplicated_files: u64,
+}
+
+/// Готує файли, шукає групи спільно серед успішних і рахує внески. Відомі суми охоплюють лише
+/// успішні файли, тож для неповного входу вони не дорівнюють публічному `total`.
+pub(crate) fn analyze(files: &[FileInput]) -> Analysis {
     let prepared: Vec<Result<Prepared, &'static str>> = files
         .iter()
         .map(|file| match &file.content {
@@ -119,9 +133,8 @@ pub fn build(origin: Origin<'_>, files: Vec<FileInput>) -> Report {
             Err(e) => Err(e.reason()),
         })
         .collect();
-    let complete = prepared.iter().all(Result::is_ok);
 
-    // Один спільний пошук серед успішних файлів; `ok[i]` — індекс у `files`.
+    // `ok[i]` — індекс у `files` для i-го успішного файла.
     let mut ok: Vec<usize> = Vec::new();
     let mut refs: Vec<&Prepared> = Vec::new();
     for (i, p) in prepared.iter().enumerate() {
@@ -132,7 +145,6 @@ pub fn build(origin: Origin<'_>, files: Vec<FileInput>) -> Report {
     }
     let found: Vec<Group> = ts_duplication::find_groups(&refs);
 
-    // Блоки з однобазовими включними межами; сортування за сирими байтами шляху.
     let mut groups: Vec<Vec<(usize, usize, usize)>> = found
         .iter()
         .map(|g| {
@@ -161,41 +173,73 @@ pub fn build(origin: Origin<'_>, files: Vec<FileInput>) -> Report {
         ranges_of[file].push((start, end));
     }
 
-    let mut records = Vec::with_capacity(files.len());
-    let mut total = Total {
+    let mut analysis = Analysis {
+        files: Vec::with_capacity(files.len()),
+        groups,
         lines: 0,
         duplicated_lines: 0,
         duplicated_blocks: 0,
         duplicated_files: 0,
-        density: Density::Zero(0),
     };
-    for (i, file) in files.iter().enumerate() {
-        let (path, path_bytes) = path_fields(&file.path);
-        match &prepared[i] {
+    for (i, p) in prepared.iter().enumerate() {
+        match p {
             Ok(p) => {
                 let dup = union_len(std::mem::take(&mut ranges_of[i]));
-                total.lines += p.lines;
-                total.duplicated_lines += dup;
-                total.duplicated_blocks += blocks_of[i];
-                total.duplicated_files += u64::from(blocks_of[i] > 0);
-                records.push(FileRecord {
-                    path,
-                    path_bytes,
-                    lines: Some(p.lines),
-                    duplicated_lines: Some(dup),
-                    duplicated_blocks: Some(blocks_of[i]),
-                    error: None,
-                });
+                analysis.lines += p.lines;
+                analysis.duplicated_lines += dup;
+                analysis.duplicated_blocks += blocks_of[i];
+                analysis.duplicated_files += u64::from(blocks_of[i] > 0);
+                analysis.files.push(Ok(Contribution {
+                    lines: p.lines,
+                    duplicated_lines: dup,
+                    duplicated_blocks: blocks_of[i],
+                }));
             }
-            Err(reason) => records.push(FileRecord {
+            Err(reason) => analysis.files.push(Err(reason)),
+        }
+    }
+    analysis
+}
+
+/// Будує звіт із готових даних. Порядок `files` збігається з порядком входу.
+///
+/// Файл, який не вдалося прочитати чи розібрати, дістає `null` у числах і причину в `error`, а
+/// `complete` і `total` стають `false` та `null`. Решта файлів однаково беруть участь у пошуку
+/// дублів.
+pub fn build(origin: Origin<'_>, files: Vec<FileInput>) -> Report {
+    let (sha, input) = origin.fields();
+    let analysis = analyze(&files);
+    let complete = analysis.files.iter().all(Result::is_ok);
+    let groups = &analysis.groups;
+
+    let mut total = Total {
+        lines: analysis.lines,
+        duplicated_lines: analysis.duplicated_lines,
+        duplicated_blocks: analysis.duplicated_blocks,
+        duplicated_files: analysis.duplicated_files,
+        density: Density::Zero(0),
+    };
+    let mut records = Vec::with_capacity(files.len());
+    for (file, outcome) in files.iter().zip(&analysis.files) {
+        let (path, path_bytes) = path_fields(&file.path);
+        records.push(match outcome {
+            Ok(c) => FileRecord {
+                path,
+                path_bytes,
+                lines: Some(c.lines),
+                duplicated_lines: Some(c.duplicated_lines),
+                duplicated_blocks: Some(c.duplicated_blocks),
+                error: None,
+            },
+            Err(reason) => FileRecord {
                 path,
                 path_bytes,
                 lines: None,
                 duplicated_lines: None,
                 duplicated_blocks: None,
                 error: Some(reason),
-            }),
-        }
+            },
+        });
     }
     if complete && !files.is_empty() {
         let tenths = density_tenths(total.duplicated_lines, total.lines);
@@ -409,6 +453,30 @@ mod tests {
         assert!(!report.complete);
         assert_eq!(v["complete"], false);
         assert!(v["total"].is_null());
+        let analysis = analyze(&[
+            file(b"a.ts", b.as_bytes()),
+            file(b"b.ts", b.as_bytes()),
+            file(b"bad.ts", b"let a = ;"),
+            file(b"bin.ts", b"\xff"),
+            FileInput {
+                path: b"gone.ts".to_vec(),
+                content: Err(ReadError),
+            },
+        ]);
+        assert_eq!(analysis.duplicated_lines, 20);
+        assert_eq!(analysis.groups.len(), 1);
+        assert_eq!(analysis.groups[0].len(), 2);
+        for i in [0, 1] {
+            assert_eq!(analysis.files[i].as_ref().unwrap().duplicated_lines, 10);
+        }
+        let reasons: Vec<_> = analysis.files[2..]
+            .iter()
+            .map(|f| f.as_ref().err().copied())
+            .collect();
+        assert_eq!(
+            reasons,
+            [Some("syntax-error"), Some("invalid-utf8"), Some("read-error")]
+        );
         assert_eq!(v["duplications"].as_array().unwrap().len(), 1);
         assert_eq!(v["files"][0]["duplicatedLines"], 10);
         let t = text(&report);
