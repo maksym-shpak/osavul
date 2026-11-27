@@ -372,6 +372,38 @@ fn isolate(cmd: &mut Command, home: &Path) {
         .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z");
 }
 
+/// Тека, з якої справний Git не бачить репозиторію: пошук обмежено її батьком, а успадковані
+/// `GIT_*` очищено. Без цього `target/` усередині робочого дерева Осавула підміняє «поза репозиторієм».
+fn outside_dir(parent: &Path, home: &Path, name: &str) -> PathBuf {
+    let dir = parent.join(name);
+    fs::create_dir_all(&dir).unwrap();
+    let mut cmd = outside_command("git", &dir, home);
+    cmd.args(["rev-parse", "--git-dir"])
+        .env("LC_ALL", "C")
+        .env("LANG", "C");
+    let out = cmd
+        .output()
+        .unwrap_or_else(|e| panic!("не вдалося запустити git у {}: {e}", dir.display()));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && stderr.contains("not a git repository"),
+        "передумова порушена: у {} виявлено репозиторій або інша помилка Git: {:?}, stdout {:?}, stderr {stderr}",
+        dir.display(),
+        out.status,
+        String::from_utf8_lossy(&out.stdout)
+    );
+    dir
+}
+
+/// Команда для теки з [`outside_dir`] із тими самими умовами пошуку Git.
+fn outside_command(program: impl AsRef<std::ffi::OsStr>, dir: &Path, home: &Path) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.current_dir(dir);
+    isolate(&mut cmd, home);
+    cmd.env("GIT_CEILING_DIRECTORIES", dir.parent().unwrap());
+    cmd
+}
+
 struct Repo {
     root: PathBuf,
     home: PathBuf,
@@ -766,12 +798,9 @@ fn unknown_revision_outside_repository_and_missing_git_are_fatal() {
         repo.git(&["rev-parse", "HEAD~1"]).as_str()
     );
     let outside = {
-        let dir = repo.home.join("outside");
-        fs::create_dir_all(&dir).unwrap();
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
-        cmd.args(["complexity", "HEAD"]).current_dir(&dir);
-        isolate(&mut cmd, &repo.home);
-        cmd.env("GIT_CEILING_DIRECTORIES", &repo.home);
+        let dir = outside_dir(&repo.home, &repo.home, "outside");
+        let mut cmd = outside_command(env!("CARGO_BIN_EXE_osavul"), &dir, &repo.home);
+        cmd.args(["complexity", "HEAD"]);
         cmd.output().unwrap()
     };
     let no_git = {
@@ -1000,15 +1029,23 @@ fn copy_corpus(dir: &Path) {
 
 #[test]
 fn local_corpus_works_outside_git_for_files_and_directory() {
-    let dir = local_dir("corpus");
+    let root = local_dir("corpus");
+    let dir = outside_dir(&root, &root, "work");
     copy_corpus(&dir);
+    let empty = root.join("empty-path");
+    fs::create_dir_all(&empty).unwrap();
     for (arg, input, expected) in [
         ("straight.ts", "file", vec![("straight.ts", 1)]),
         ("branch.ts", "file", vec![("branch.ts", 2)]),
         (".", "directory", vec![("branch.ts", 2), ("straight.ts", 1)]),
     ] {
-        let first = local_run(&dir, &["complexity", "--path", arg], false);
-        let second = local_run(&dir, &["complexity", "--path", arg], false);
+        let run = || {
+            let mut cmd = outside_command(env!("CARGO_BIN_EXE_osavul"), &dir, &root);
+            cmd.args(["complexity", "--path", arg]).env("PATH", &empty);
+            cmd.output().unwrap()
+        };
+        let first = run();
+        let second = run();
         assert_eq!(first.status.code(), Some(0), "{arg}");
         assert!(first.stderr.is_empty());
         assert_eq!(first.stdout, second.stdout);
@@ -1749,18 +1786,15 @@ fn coverage_old_commit_from_subdirectory_with_absolute_sf() {
         ],
     );
     assert_fatal(&bad);
-    let outside = repo.home.join("plain");
-    fs::create_dir_all(&outside).unwrap();
-    let bad = repo.run(
-        &outside,
-        &[
-            "coverage",
-            "HEAD",
-            "--lcov",
-            reports.join("r.info").to_str().unwrap(),
-        ],
-    );
-    assert_fatal(&bad);
+    let outside = outside_dir(&repo.home, &repo.home, "plain");
+    let mut cmd = outside_command(env!("CARGO_BIN_EXE_osavul"), &outside, &repo.home);
+    cmd.args([
+        "coverage",
+        "HEAD",
+        "--lcov",
+        reports.join("r.info").to_str().unwrap(),
+    ]);
+    assert_fatal(&cmd.output().unwrap());
 }
 
 #[test]
@@ -1911,7 +1945,7 @@ fn directory_with_unprintable_nested_name_fails_only_that_file() {
     assert!(err.contains("один запис"), "{err}");
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn nested_non_utf8_name_is_printed_as_raw_bytes() {
     use std::os::unix::ffi::OsStrExt;
