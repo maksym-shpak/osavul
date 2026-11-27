@@ -46,6 +46,19 @@ impl Policy {
         self.suffixes.iter().any(|s| key.ends_with(s))
     }
 
+    fn skips_dir(&self, name: &[u8]) -> bool {
+        EXCLUDED.iter().any(|x| x.as_bytes() == name)
+            || self.skip_nested_dirs.iter().any(|x| x.as_bytes() == name)
+    }
+
+    /// Відбір кореневого ключа (`a/b.ts`): суфікс і жодної виключеної теки серед цілих компонентів
+    /// шляху. Збігається з обходом `select` для вкладених файлів.
+    pub fn selects_key(&self, key: &[u8]) -> bool {
+        let mut parts = key.split(|b| *b == b'/');
+        let _file = parts.next_back();
+        self.accepts(key) && !parts.any(|dir| self.skips_dir(dir))
+    }
+
     fn describe(&self) -> String {
         let list: Vec<String> = self
             .suffixes
@@ -60,13 +73,72 @@ impl Policy {
 const EXCLUDED: [&str; 2] = [".git", "node_modules"];
 
 #[cfg(unix)]
-fn os_bytes(s: &std::ffi::OsStr) -> Vec<u8> {
+pub fn os_bytes(s: &std::ffi::OsStr) -> Vec<u8> {
     std::os::unix::ffi::OsStrExt::as_bytes(s).to_vec()
 }
 
 #[cfg(not(unix))]
-fn os_bytes(s: &std::ffi::OsStr) -> Vec<u8> {
+pub fn os_bytes(s: &std::ffi::OsStr) -> Vec<u8> {
     s.to_string_lossy().into_owned().into_bytes()
+}
+
+#[cfg(unix)]
+pub fn path_from_bytes(b: &[u8]) -> PathBuf {
+    PathBuf::from(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(b))
+}
+
+#[cfg(not(unix))]
+pub fn path_from_bytes(b: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(b).into_owned())
+}
+
+/// Чи кореневий ключ на диску є звичайним файлом поза межами посилань і вкладених репозиторіїв.
+/// Перевіряються всі теки-предки: посилання або тека з власним `.git` (підмодуль чи вкладений
+/// репозиторій, зокрема з відстежуваними нащадками) виключають шлях. Вилучений із диска шлях —
+/// `false`. Інша відмова `stat` не приховується: файл лишається кандидатом і дає помилку читання.
+pub fn is_plain_file(root: &Path, key: &[u8]) -> bool {
+    let mut path = root.to_path_buf();
+    let mut parts = key.split(|b| *b == b'/').peekable();
+    while let Some(part) = parts.next() {
+        path.push(path_from_bytes(part));
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(e) => return e.kind() != std::io::ErrorKind::NotFound,
+        };
+        if parts.peek().is_some() {
+            if !meta.is_dir() || is_repository_dir(&path) {
+                return false;
+            }
+        } else {
+            return meta.is_file();
+        }
+    }
+    false
+}
+
+/// Тека є межею репозиторію: має запис `.git` або сама є bare-репозиторієм. Збіг імен `HEAD`,
+/// `objects/`, `refs/` лише добирає кандидата: звичайна фікстура з такою структурою всередині
+/// робочого дерева не є межею, тож фактичну природу підтверджує сам Git.
+fn is_repository_dir(dir: &Path) -> bool {
+    if fs::symlink_metadata(dir.join(".git")).is_ok() {
+        return true;
+    }
+    let looks_bare = fs::metadata(dir.join("HEAD")).is_ok_and(|m| m.is_file())
+        && fs::metadata(dir.join("objects")).is_ok_and(|m| m.is_dir())
+        && fs::metadata(dir.join("refs")).is_ok_and(|m| m.is_dir());
+    looks_bare
+        && std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["rev-parse", "--is-bare-repository"])
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .output()
+            .is_ok_and(|o| o.status.success() && o.stdout.trim_ascii() == b"true")
+}
+
+pub fn read_key(root: &Path, key: &[u8]) -> Result<Vec<u8>, String> {
+    fs::read(root.join(path_from_bytes(key))).map_err(|e| format!("не вдалося прочитати: {e}"))
 }
 
 /// Повний відбір без читання вмісту. `Err` — фатальна відмова: повний перелік скласти неможливо.
@@ -119,7 +191,7 @@ pub fn select(root: &Path, policy: &Policy) -> Result<(InputKind, Vec<Selected>)
             let mut key = prefix.clone();
             key.extend(os_bytes(&name));
             if ty.is_dir() {
-                if policy.skip_nested_dirs.iter().any(|x| name == *x) {
+                if policy.skips_dir(&os_bytes(&name)) {
                     continue;
                 }
                 key.push(b'/');
@@ -281,6 +353,58 @@ mod tests {
         );
         assert!(select(&root.join("alias.txt"), &METRICS).is_err());
         assert_eq!(keys(&root.join("bad.ts")), ["bad.ts"]);
+    }
+
+    // Виявляє розбіжність відбору ключів з обходом: цілі компоненти, різна глибина, роль `target`.
+    #[test]
+    fn key_selection_uses_whole_directory_components() {
+        let both = [(&CHECK, true), (&METRICS, false)];
+        let sel = |p: &Policy, k: &str| p.selects_key(k.as_bytes());
+        for (policy, _) in both {
+            assert!(sel(policy, "a.ts") && sel(policy, "types.d.ts"));
+            assert!(sel(policy, "my.git/a.ts") && sel(policy, "node_modules2/a.ts"));
+            assert!(sel(policy, "x/.github/a.ts"));
+            for k in [
+                ".git/a.ts",
+                "x/.git/a.ts",
+                "node_modules/a.ts",
+                "a/node_modules/b/c.ts",
+            ] {
+                assert!(!sel(policy, k), "{k}");
+            }
+            assert!(!sel(policy, "a.tsx") && !sel(policy, "A.TS"));
+        }
+        assert!(sel(&CHECK, "x.rs") && !sel(&METRICS, "x.rs"));
+        assert!(!sel(&CHECK, "target/a.ts") && !sel(&CHECK, "deep/target/b.rs"));
+        assert!(sel(&METRICS, "target/a.ts") && sel(&METRICS, "deep/target/a.ts"));
+        assert!(sel(&CHECK, "target.rs") && sel(&CHECK, "mytarget/a.ts"));
+    }
+
+    #[test]
+    fn plain_file_check_covers_missing_nested_repositories_and_directories() {
+        let root = tree("plain");
+        touch(&root, "a.ts");
+        touch(&root, "nested/inner.ts");
+        fs::create_dir_all(root.join("nested/.git")).unwrap();
+        fs::create_dir(root.join("dir.ts")).unwrap();
+        assert!(is_plain_file(&root, b"a.ts"));
+        assert!(!is_plain_file(&root, b"gone.ts"));
+        assert!(!is_plain_file(&root, b"nested/inner.ts"));
+        assert!(!is_plain_file(&root, b"dir.ts"));
+        assert!(!is_plain_file(&root, b"a.ts/x.ts"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plain_file_check_rejects_links_and_link_ancestors() {
+        use std::os::unix::fs::symlink;
+        let root = tree("plain-links");
+        touch(&root, "real/inner.ts");
+        symlink("real/inner.ts", root.join("link.ts")).unwrap();
+        symlink("real", root.join("linkdir")).unwrap();
+        assert!(is_plain_file(&root, b"real/inner.ts"));
+        assert!(!is_plain_file(&root, b"link.ts"));
+        assert!(!is_plain_file(&root, b"linkdir/inner.ts"));
     }
 
     #[test]

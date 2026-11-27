@@ -14,9 +14,43 @@ pub enum Lang {
     TypeScript,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureKind {
+    File,
+    Tool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectError {
+    pub kind: FailureKind,
+    pub reason: String,
+}
+
+impl DetectError {
+    pub fn file(reason: impl Into<String>) -> Self {
+        Self {
+            kind: FailureKind::File,
+            reason: reason.into(),
+        }
+    }
+
+    pub fn tool(reason: impl Into<String>) -> Self {
+        Self {
+            kind: FailureKind::Tool,
+            reason: reason.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for DetectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
 /// Мовна реалізація: вміст одного файла й ім'я для режиму розбору → фізичні рядки від 1 (з
-/// повторами) або причина відмови файла.
-pub type Detector = fn(&[u8], &str) -> Result<Vec<usize>, String>;
+/// повторами) або причина відмови з категорією.
+pub type Detector = fn(&[u8], &str) -> Result<Vec<usize>, DetectError>;
 
 /// Правило: один ідентифікатор і повідомлення для всіх мов та реалізація для кожної мови.
 pub struct Rule {
@@ -26,6 +60,30 @@ pub struct Rule {
 }
 
 const RULES: &[&Rule] = &[&EMPTY_TEST];
+
+/// Повний реєстр правил: кожне з них стає окремою умовою gate.
+pub fn rules() -> &'static [&'static Rule] {
+    RULES
+}
+
+/// Чи застосовується до ключа Rust-реалізація правил, тобто потрібен локальний `rustc`.
+pub fn uses_rust(key: &[u8]) -> bool {
+    language_of(key) == Some(Lang::Rust)
+}
+
+/// Перевіряє, що `rustc` у потрібному синтаксичному режимі працює на коректному тексті. Будь-яка
+/// відмова тут — недоступність інструмента, а не помилка чийогось файла.
+pub fn probe_rust() -> Result<(), DetectError> {
+    crate::empty_rust_test::probe().map_err(|e| DetectError::tool(e.reason))
+}
+
+/// Шлях знахідки для коміту: кореневий ключ без префікса; має вміщуватися в один запис.
+pub fn commit_path(key: &[u8]) -> Result<Vec<u8>, String> {
+    if key.contains(&b'\n') {
+        return Err("шлях містить перенесення рядка й не вміщується в один запис".into());
+    }
+    Ok(key.to_vec())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
@@ -57,10 +115,15 @@ pub fn render(findings: &mut [Finding]) -> Vec<u8> {
     out
 }
 
+/// Шлях знахідки в теці `arg`, як у `check` для теки.
+pub fn directory_path(arg: &[u8], key: &[u8]) -> Result<Vec<u8>, String> {
+    printed_path(arg, InputKind::Directory, key)
+}
+
 /// Шлях знахідки: для явного файла — дослівний аргумент, для теки — аргумент, `/` (якщо аргумент
 /// ще не закінчується роздільником) і ключ файла.
-fn printed_path(arg: &str, kind: InputKind, key: &[u8]) -> Result<Vec<u8>, String> {
-    let mut path = arg.as_bytes().to_vec();
+fn printed_path(arg: &[u8], kind: InputKind, key: &[u8]) -> Result<Vec<u8>, String> {
+    let mut path = arg.to_vec();
     if kind == InputKind::Directory {
         let sep_native = cfg!(windows) && path.last() == Some(&b'\\');
         if path.last() != Some(&b'/') && !sep_native {
@@ -84,7 +147,7 @@ fn printed_path(arg: &str, kind: InputKind, key: &[u8]) -> Result<Vec<u8>, Strin
     Ok(path)
 }
 
-fn shown(path: &[u8]) -> String {
+pub fn shown(path: &[u8]) -> String {
     let s = String::from_utf8_lossy(path);
     if s.contains('\n') || s.contains('\u{fffd}') {
         format!("{s:?}")
@@ -105,7 +168,7 @@ pub fn execute(arg: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) -> u8 
     let mut findings = Vec::new();
     let mut failed = false;
     for file in &selected {
-        let label = printed_path(arg, kind, &file.key);
+        let label = printed_path(arg.as_bytes(), kind, &file.key);
         // Коли шлях знахідки неподатний, діагностика все одно називає файл: аргумент + ключ.
         let name = match &label {
             Ok(path) => shown(path),
@@ -156,8 +219,14 @@ pub fn execute(arg: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) -> u8 
 }
 
 /// Читає файл і запускає всі застосовні правила; успіх лише коли успішні всі.
-fn check_file(disk: &Path, key: &[u8]) -> Result<Vec<(&'static Rule, usize)>, String> {
-    let source = std::fs::read(disk).map_err(|e| format!("не вдалося прочитати: {e}"))?;
+fn check_file(disk: &Path, key: &[u8]) -> Result<Vec<(&'static Rule, usize)>, DetectError> {
+    let source =
+        std::fs::read(disk).map_err(|e| DetectError::file(format!("не вдалося прочитати: {e}")))?;
+    check_bytes(key, &source)
+}
+
+/// Застосовує правила до вже прочитаних байтів; `key` визначає мову й режим розбору.
+pub fn check_bytes(key: &[u8], source: &[u8]) -> Result<Vec<(&'static Rule, usize)>, DetectError> {
     let Some(lang) = language_of(key) else {
         return Ok(Vec::new());
     };
@@ -166,7 +235,7 @@ fn check_file(disk: &Path, key: &[u8]) -> Result<Vec<(&'static Rule, usize)>, St
     for rule in RULES {
         for (l, detect) in rule.detectors {
             if *l == lang {
-                for line in detect(&source, &name)? {
+                for line in detect(source, &name)? {
                     all.push((*rule, line));
                 }
             }
@@ -215,11 +284,12 @@ mod tests {
 
     #[test]
     fn printed_path_joins_directory_without_doubling_separator() {
-        let p = |a: &str, k: &str, kind| printed_path(a, kind, k.as_bytes()).unwrap();
+        let p = |a: &str, k: &str, kind| printed_path(a.as_bytes(), kind, k.as_bytes()).unwrap();
         assert_eq!(p("./src", "a/b.rs", InputKind::Directory), b"./src/a/b.rs");
         assert_eq!(p("./src/", "a.rs", InputKind::Directory), b"./src/a.rs");
         assert_eq!(p("./x.rs", "x.rs", InputKind::File), b"./x.rs");
-        assert!(printed_path("d", InputKind::Directory, b"a\nb.rs").is_err());
-        assert!(printed_path("a\nb.rs", InputKind::File, b"b.rs").is_err());
+        assert_eq!(p(".", "a.rs", InputKind::Directory), b"./a.rs");
+        assert!(printed_path(b"d", InputKind::Directory, b"a\nb.rs").is_err());
+        assert!(printed_path(b"a\nb.rs", InputKind::File, b"b.rs").is_err());
     }
 }

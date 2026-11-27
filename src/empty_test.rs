@@ -2,7 +2,7 @@
 //! Детектор отримує вміст одного файла й повертає лише фізичні рядки; шлях, формат запису й
 //! коди завершення належать рушію.
 
-use crate::check::{Detector, Lang, Rule};
+use crate::check::{DetectError, Detector, Lang, Rule};
 use crate::empty_rust_test;
 use crate::ts_source::{line_of, line_starts, with_parsed};
 use oxc_ast::ast::{Argument, CallExpression, Expression};
@@ -17,14 +17,15 @@ pub const EMPTY_TEST: Rule = Rule {
     ],
 };
 
-fn rust(source: &[u8], _name: &str) -> Result<Vec<usize>, String> {
-    let text = std::str::from_utf8(source).map_err(|e| format!("вміст не є UTF-8: {e}"))?;
+fn rust(source: &[u8], _name: &str) -> Result<Vec<usize>, DetectError> {
+    let text = std::str::from_utf8(source)
+        .map_err(|e| DetectError::file(format!("вміст не є UTF-8: {e}")))?;
     empty_rust_test::find_empty_tests(text)
 }
 
 /// Будь-яка діагностика Oxc відхиляє файл (`with_parsed`); BOM знято до побудови карти рядків,
 /// тож позиції лишаються фізичними.
-fn typescript(source: &[u8], name: &str) -> Result<Vec<usize>, String> {
+fn typescript(source: &[u8], name: &str) -> Result<Vec<usize>, DetectError> {
     with_parsed(name.as_bytes(), source, |text, program, _| {
         let mut finder = Finder {
             starts: line_starts(text),
@@ -33,7 +34,7 @@ fn typescript(source: &[u8], name: &str) -> Result<Vec<usize>, String> {
         finder.visit_program(program);
         finder.lines
     })
-    .map_err(|e| e.reason().to_string())
+    .map_err(|e| DetectError::file(e.reason()))
 }
 
 struct Finder {
@@ -174,9 +175,12 @@ mod tests {
         assert_eq!(lines("\u{feff}\nit('a', () => {});"), [2]);
         assert_eq!(
             typescript(b"it('a', () => {});\nlet x = ;", "a.ts"),
-            Err("syntax-error".to_string())
+            Err(DetectError::file("syntax-error"))
         );
-        assert_eq!(typescript(b"\xff", "a.ts"), Err("invalid-utf8".to_string()));
+        assert_eq!(
+            typescript(b"\xff", "a.ts"),
+            Err(DetectError::file("invalid-utf8"))
+        );
     }
 
     #[test]

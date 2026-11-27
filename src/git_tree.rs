@@ -3,6 +3,8 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
 
+use crate::local_tree;
+
 /// Вміст об'єкта не вдалося отримати: його немає, він не `blob` або вивід Git обірвано.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ReadError;
@@ -81,12 +83,189 @@ pub fn match_root() -> Result<Vec<u8>, String> {
 /// звичайних файлів `.ts` від кореня дерева цього коміту.
 pub fn inventory(rev: &str) -> Result<Inventory, String> {
     let sha = resolve_commit(rev)?;
-
-    let mut cmd = git();
-    cmd.args(["ls-tree", "-r", "-z", "--full-tree", &sha]);
-    let listing = run(cmd, &format!("не вдалося прочитати дерево коміту {sha}"))?;
-    let entries = parse_listing(&listing)?;
+    let entries = tree_entries(&sha)?
+        .into_iter()
+        .filter(|e| e.path.ends_with(b".ts"))
+        .collect();
     Ok(Inventory { sha, entries })
+}
+
+/// Усі звичайні й виконувані `blob` повного дерева коміту.
+fn tree_entries(sha: &str) -> Result<Vec<Entry>, String> {
+    let mut cmd = git();
+    cmd.args(["ls-tree", "-r", "-z", "--full-tree", sha]);
+    let listing = run(cmd, &format!("не вдалося прочитати дерево коміту {sha}"))?;
+    parse_listing(&listing)
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Selection {
+    pub check: bool,
+    pub dup: bool,
+}
+
+/// Відбір для gate: записи, що входять хоча б в одну умову за політиками `CHECK` і `METRICS`,
+/// застосованими до кореневого байтового ключа. Окремий від `inventory`, щоб звіти метрик
+/// зберегли свій відбір.
+pub struct GateInventory {
+    pub entries: Vec<Entry>,
+    pub selections: Vec<Selection>,
+}
+
+pub fn gate_inventory(rev: &str) -> Result<GateInventory, String> {
+    let sha = resolve_commit(rev)?;
+    let mut inv = GateInventory {
+        entries: Vec::new(),
+        selections: Vec::new(),
+    };
+    for entry in tree_entries(&sha)? {
+        let selection = Selection {
+            check: local_tree::CHECK.selects_key(&entry.path),
+            dup: local_tree::METRICS.selects_key(&entry.path),
+        };
+        if selection.check || selection.dup {
+            inv.entries.push(entry);
+            inv.selections.push(selection);
+        }
+    }
+    Ok(inv)
+}
+
+/// Верхня тека робочого дерева, у контексті якого розв'язується база. Аргумент мусить бути
+/// фізично тією самою текою; його написання не важливе, але підтека чи корінь іншого дерева —
+/// помилка. Bare-репозиторій робочого дерева не має.
+pub fn worktree_root(arg: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let mut cmd = git();
+    cmd.args(["rev-parse", "--is-bare-repository"]);
+    let bare = run(cmd, "не вдалося визначити тип репозиторію")?;
+    if bare.trim_ascii() == b"true" {
+        return Err("репозиторій без робочого дерева: --path потребує робочого дерева".into());
+    }
+    let mut cmd = git();
+    cmd.args(["rev-parse", "--show-toplevel"]);
+    let mut top = run(cmd, "не вдалося визначити корінь робочого дерева")?;
+    if top.last() == Some(&b'\n') {
+        top.pop();
+    }
+    if top.is_empty() {
+        return Err("не вдалося визначити корінь робочого дерева: порожня відповідь".into());
+    }
+    let root = local_tree::path_from_bytes(&top);
+    let physical = |p: &std::path::Path| {
+        std::fs::canonicalize(p)
+            .map_err(|e| format!("не вдалося визначити теку {}: {e}", p.display()))
+    };
+    let (given, real) = (physical(arg)?, physical(&root)?);
+    if given != real {
+        return Err(format!(
+            "{}: має бути верхньою текою робочого дерева {}",
+            arg.display(),
+            root.display()
+        ));
+    }
+    Ok(root)
+}
+
+/// Перелік шляхів від кореня робочого дерева: успіх лише за статусу 0, порожнього stderr (Git
+/// повідомляє про недоступні теки попередженням і все одно завершується успішно) і повних
+/// NUL-завершених записів.
+fn listing(args: &[&str], what: &str) -> Result<Vec<u8>, String> {
+    // Git запускається з початкової теки, щоб відносні GIT_DIR/GIT_WORK_TREE лишалися чинними;
+    // `--full-name` і `:/` дають шляхи від кореня дерева незалежно від місця запуску.
+    // Спостерігач файлової системи з конфігурації репозиторію може виконувати довільний скрипт.
+    let out = git()
+        .env_remove("GIT_LITERAL_PATHSPECS")
+        .args(["-c", "core.fsmonitor=false"])
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("не вдалося запустити git: {e}"))?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        return Err(format!("{what}: {}", stderr.trim()));
+    }
+    if !out.stderr.is_empty() {
+        return Err(format!("{what}: перелік неповний: {}", stderr.trim()));
+    }
+    if out.stdout.last().is_some_and(|b| *b != 0) {
+        return Err(format!("{what}: перелік обірвано"));
+    }
+    Ok(out.stdout)
+}
+
+/// Значення `core.symlinks` для репозиторію; без налаштування Git вважає посилання підтримуваними.
+fn symlinks_supported() -> Result<bool, String> {
+    let out = git()
+        .args(["config", "--type=bool", "--get", "core.symlinks"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("не вдалося запустити git: {e}"))?;
+    match out.status.code() {
+        Some(0) => Ok(out.stdout.trim_ascii() != b"false"),
+        Some(1) => Ok(true),
+        _ => Err(format!(
+            "не вдалося прочитати core.symlinks: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
+}
+
+/// Відбір для gate з диска: відстежувані (зокрема ігноровані) та невідстежувані неігноровані
+/// шляхи за переліком Git, звичайні файли, які ще існують, без посилань, підмодулів і вкладених
+/// репозиторіїв. Ключі впорядковані за байтами, без повторів.
+pub struct WorktreeInventory {
+    pub root: std::path::PathBuf,
+    pub keys: Vec<Vec<u8>>,
+    pub selections: Vec<Selection>,
+}
+
+pub fn worktree_inventory(arg: &std::path::Path) -> Result<WorktreeInventory, String> {
+    let root = worktree_root(arg)?;
+    let tracked = listing(
+        &["ls-files", "-z", "--stage", "--full-name", "--", ":/"],
+        "не вдалося отримати перелік відстежуваних файлів",
+    )?;
+    let untracked = listing(
+        &["ls-files", "-z", "--others", "--exclude-standard", "--full-name", "--", ":/"],
+        "не вдалося отримати перелік невідстежуваних файлів",
+    )?;
+    // true — запис не є звичайним файлом за режимом індексу. Посилання (120000) тут виняток лише
+    // коли Git матеріалізує його звичайним файлом (core.symlinks=false); інакше тип визначає диск.
+    let links_are_files = !symlinks_supported()?;
+    let mut keys: std::collections::BTreeMap<Vec<u8>, bool> = std::collections::BTreeMap::new();
+    for record in tracked.split(|b| *b == 0).filter(|r| !r.is_empty()) {
+        let bad = || "неочікуваний формат переліку відстежуваних файлів".to_string();
+        let tab = record.iter().position(|b| *b == b'\t').ok_or_else(bad)?;
+        let meta = std::str::from_utf8(&record[..tab]).map_err(|_| bad())?;
+        let mode = meta.split(' ').next().ok_or_else(bad)?;
+        let skip = mode == "160000" || (mode == "120000" && links_are_files);
+        *keys.entry(record[tab + 1..].to_vec()).or_default() |= skip;
+    }
+    for path in untracked.split(|b| *b == 0).filter(|r| !r.is_empty()) {
+        // Вкладений репозиторій Git показує як теку із завершальним роздільником.
+        if path.ends_with(b"/") {
+            continue;
+        }
+        keys.entry(path.to_vec()).or_insert(false);
+    }
+    let mut inv = WorktreeInventory {
+        root,
+        keys: Vec::new(),
+        selections: Vec::new(),
+    };
+    for (key, skip) in keys {
+        let selection = Selection {
+            check: local_tree::CHECK.selects_key(&key),
+            dup: local_tree::METRICS.selects_key(&key),
+        };
+        if skip || !(selection.check || selection.dup) || !local_tree::is_plain_file(&inv.root, &key)
+        {
+            continue;
+        }
+        inv.keys.push(key);
+        inv.selections.push(selection);
+    }
+    Ok(inv)
 }
 
 /// Розв'язує ревізію як окремий аргумент Git без переписування виразу. Неоднозначні імена
@@ -130,8 +309,9 @@ fn resolve_commit(rev: &str) -> Result<String, String> {
     Ok(sha)
 }
 
-/// Розбирає вивід `ls-tree -z`, лишаючи лише `blob` із режимами `100644` і `100755` та суфіксом
-/// `.ts`; результат відсортований за байтами шляху.
+/// Розбирає вивід `ls-tree -z`, лишаючи всі `blob` із режимами `100644` і `100755` (посилання й
+/// gitlink пропускаються); вибір за іменем лишається споживачеві. Результат відсортований за
+/// байтами шляху.
 fn parse_listing(listing: &[u8]) -> Result<Vec<Entry>, String> {
     let mut entries = Vec::new();
     for record in listing.split(|b| *b == 0).filter(|r| !r.is_empty()) {
@@ -144,7 +324,7 @@ fn parse_listing(listing: &[u8]) -> Result<Vec<Entry>, String> {
             (Some(m), Some(k), Some(o)) => (m, k, o),
             _ => return Err(bad()),
         };
-        if kind == "blob" && matches!(mode, "100644" | "100755") && path.ends_with(b".ts") {
+        if kind == "blob" && matches!(mode, "100644" | "100755") {
             entries.push(Entry {
                 path: path.to_vec(),
                 oid: oid.to_string(),
