@@ -207,6 +207,10 @@ fn gate(base: &OsString, rev: &OsString) -> ExitCode {
     };
     match gate::compare_commits(base, rev) {
         Ok(verdict) => {
+            let mut stderr = std::io::stderr();
+            for warning in &verdict.warnings {
+                let _ = writeln!(stderr, "osavul: {warning}");
+            }
             let mut stdout = std::io::stdout().lock();
             if let Err(e) = stdout
                 .write_all(&verdict.stdout)

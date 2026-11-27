@@ -16,7 +16,6 @@ pub enum Lang {
 
 /// Категорія відмови детектора: проблема вхідного файла чи недоступність потрібного інструмента.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))] // читається gate у наступних частинах
 pub enum FailureKind {
     File,
     Tool,
@@ -25,7 +24,6 @@ pub enum FailureKind {
 /// Причина відмови детектора разом із категорією.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetectError {
-    #[cfg_attr(not(test), allow(dead_code))]
     pub kind: FailureKind,
     pub reason: String,
 }
@@ -68,6 +66,17 @@ const RULES: &[&Rule] = &[&EMPTY_TEST];
 /// Повний реєстр правил: кожне з них стає окремою умовою gate.
 pub fn rules() -> &'static [&'static Rule] {
     RULES
+}
+
+/// Чи застосовується до ключа Rust-реалізація правил, тобто потрібен локальний `rustc`.
+pub fn uses_rust(key: &[u8]) -> bool {
+    language_of(key) == Some(Lang::Rust)
+}
+
+/// Перевіряє, що `rustc` у потрібному синтаксичному режимі працює на коректному тексті. Будь-яка
+/// відмова тут — недоступність інструмента, а не помилка чийогось файла.
+pub fn probe_rust() -> Result<(), DetectError> {
+    crate::empty_rust_test::probe().map_err(|e| DetectError::tool(e.reason))
 }
 
 /// Шлях знахідки для коміту: кореневий ключ без префікса; має вміщуватися в один запис.

@@ -19,6 +19,11 @@ pub fn find_empty_tests(source: &str) -> Result<Vec<usize>, DetectError> {
     Ok(lines)
 }
 
+/// Запускає потрібний режим `rustc` на заздалегідь коректному тексті.
+pub fn probe() -> Result<(), DetectError> {
+    check_syntax("fn main() {}\n")
+}
+
 /// Перевіряє синтаксис через локальний `rustc`; `Err` — `rustc` не запустився або відхилив текст.
 fn check_syntax(source: &str) -> Result<(), DetectError> {
     // -Z потребує RUSTC_BOOTSTRAP; змінна ставиться лише дочірньому процесу.

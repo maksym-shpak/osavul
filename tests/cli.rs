@@ -2349,3 +2349,132 @@ fn gate_stdout_write_failure_is_fatal() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("не вдалося записати звіт: "), "{stderr}");
 }
+
+fn stderr_of(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// Знищує loose-об'єкт blob, щоб файл став непрочитаним у цьому коміті.
+fn destroy_blob(repo: &Repo, path: &str, rev: &str) {
+    let oid = repo.git(&["rev-parse", &format!("{rev}:{path}")]);
+    let obj = repo.loose_object(&oid);
+    make_writable(&obj);
+    fs::remove_file(obj).unwrap();
+}
+
+#[test]
+fn gate_fixing_broken_base_file_passes_with_base_warning() {
+    let repo = Repo::new("gate-fix-base");
+    repo.write("broken.ts", b"function (");
+    repo.write("ok.test.ts", FULL_TS.as_bytes());
+    let base = repo.commit("base");
+    repo.write("broken.ts", b"function f() {}\n");
+    let rev = repo.commit("fix");
+    let out = gate(&repo, &repo.root, &base, &rev);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    assert_eq!(
+        stdout_of(&out),
+        "empty-test: пройдено: було 0, стало 0\nduplication: пройдено: було 0, стало 0\ngate: пройдено\n"
+    );
+    let err = stderr_of(&out);
+    assert!(
+        err.contains("база") && err.contains("broken.ts"),
+        "{err}"
+    );
+    // Зламаний файл у ревізії — завжди 2.
+    assert_eq!(gate(&repo, &repo.root, &rev, &base).status.code(), Some(2));
+}
+
+#[test]
+fn gate_partial_base_keeps_known_duplication_sum() {
+    let repo = Repo::new("gate-partial-base");
+    repo.write("a.ts", DUP_BLOCK.as_bytes());
+    repo.write("b.ts", DUP_BLOCK.as_bytes());
+    repo.write("c.ts", b"function (");
+    let base = repo.commit("base");
+    repo.write("c.ts", b"function c() {}\n");
+    let fixed = repo.commit("fix");
+    let out = gate(&repo, &repo.root, &base, &fixed);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    assert!(stdout_of(&out).contains("duplication: пройдено: було 30, стало 30\n"));
+    assert!(stderr_of(&out).contains("c.ts"));
+
+    // Відсутній blob бази: відома сума лишається, погіршення проти неї дає 1 із місцями.
+    repo.write("d.ts", DUP_BLOCK.as_bytes());
+    repo.write("c.ts", b"function c() {}\n");
+    let worse = repo.commit("worse");
+    destroy_blob(&repo, "c.ts", &base);
+    let out = gate(&repo, &repo.root, &base, &worse);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert!(text.contains("duplication: не пройдено: було 30, стало 45\n"), "{text}");
+    assert!(text.contains("d.ts:1-15: duplication: група 1\n"), "{text}");
+    assert!(stderr_of(&out).contains("c.ts"));
+}
+
+#[test]
+fn gate_target_errors_beat_violation_and_name_every_file_with_base_warning() {
+    let repo = Repo::new("gate-target-errors");
+    repo.write("broken.ts", b"function (");
+    let base = repo.commit("base");
+    repo.write("t.test.ts", EMPTY_TS.as_bytes());
+    repo.write("bad1.ts", b"const = ;");
+    repo.write("bad2.ts", b"function (");
+    repo.write("odd\nname.ts", b"let a = 1;\n");
+    let rev = repo.commit("worse");
+    let out = gate(&repo, &repo.root, &base, &rev);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    let err = stderr_of(&out);
+    assert!(err.contains("попередження: база: broken.ts"), "{err}");
+    for name in ["ревізія: bad1.ts", "ревізія: bad2.ts", "ревізія: \"odd"] {
+        assert!(err.contains(name), "{err}");
+    }
+}
+
+/// Запуск gate із PATH, де є лише Git: `rustc` недоступний, а Git справний.
+#[cfg(unix)]
+fn gate_without_rustc(repo: &Repo, base: &str, rev: &str) -> Output {
+    let bin = repo.home.join("git-only");
+    fs::create_dir_all(&bin).unwrap();
+    let git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|d| d.join("git"))
+        .find(|p| p.is_file())
+        .expect("git у PATH");
+    let link = bin.join("git");
+    if !link.exists() {
+        std::os::unix::fs::symlink(git, link).unwrap();
+    }
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
+    cmd.args(["gate", base, rev]).current_dir(&repo.root);
+    isolate(&mut cmd, &repo.home);
+    cmd.env("PATH", &bin);
+    cmd.output().unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn gate_needs_rustc_only_when_rust_files_are_selected() {
+    let repo = Repo::new("gate-rustc");
+    repo.write("ok.test.ts", FULL_TS.as_bytes());
+    repo.write("target/x.rs", b"fn main( {");
+    let ts_only = repo.commit("ts only");
+    let out = gate_without_rustc(&repo, &ts_only, &ts_only);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+
+    // Єдиний .rs лише в базі, недекодований: rustc усе одно потрібен.
+    repo.git(&["rm", "-rq", "target"]);
+    repo.write("lib.rs", b"\xff\xfe");
+    let base = repo.commit("bad rs");
+    repo.write("lib.rs", b"fn ok() {}\n");
+    let rev = repo.commit("fixed rs");
+    let out = gate_without_rustc(&repo, &base, &rev);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    assert!(stderr_of(&out).contains("rustc"), "{}", stderr_of(&out));
+
+    // За справного rustc виправлення синтаксису дає попередження бази й код за сумами.
+    let out = gate(&repo, &repo.root, &base, &rev);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    assert!(stderr_of(&out).contains("lib.rs"));
+}

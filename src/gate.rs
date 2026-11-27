@@ -9,10 +9,11 @@ use crate::complexity_report::FileInput;
 use crate::duplication_report::{self, Analysis};
 use crate::git_tree;
 
-/// Готовий результат порівняння: повний stdout і код 0 або 1.
+/// Готовий результат порівняння: повний stdout, код 0 або 1 і попередження про файли бази.
 pub struct Verdict {
     pub stdout: Vec<u8>,
     pub code: u8,
+    pub warnings: Vec<String>,
 }
 
 struct Found {
@@ -28,37 +29,117 @@ struct Side {
     dup: Analysis,
 }
 
-/// Порівнює два коміти. `Err` — фатальна відмова: кожен елемент є рядком діагностики.
-pub fn compare_commits(base: &str, rev: &str) -> Result<Verdict, Vec<String>> {
-    let base_side = load("база", base);
-    let target_side = load("ревізія", rev);
-    match (base_side, target_side) {
-        (Ok(base), Ok(target)) => Ok(compare(&base, &target)),
-        (b, t) => {
-            let mut errors = Vec::new();
-            errors.extend(b.err().unwrap_or_default());
-            errors.extend(t.err().unwrap_or_default());
-            Err(errors)
-        }
+/// Вхідні дані одного боку до аналізу.
+struct Raw {
+    label: &'static str,
+    inv: git_tree::GateInventory,
+    contents: Vec<Result<Vec<u8>, git_tree::ReadError>>,
+}
+
+impl Raw {
+    fn needs_rust(&self) -> bool {
+        // Рішення залежить лише від відібраних ключів, а не від того, чи вдалося їх прочитати.
+        self.inv
+            .entries
+            .iter()
+            .zip(&self.inv.selections)
+            .any(|(e, s)| s.check && check::uses_rust(&e.path))
     }
 }
 
-fn load(label: &str, rev: &str) -> Result<Side, Vec<String>> {
-    let inv = git_tree::gate_inventory(rev).map_err(|e| vec![format!("{label}: {e}")])?;
-    let contents = git_tree::read_contents(&inv.entries);
+/// Порівнює два коміти. `Err` — фатальна відмова: кожен елемент є рядком діагностики
+/// (попередження бази, якщо вони вже встановлені, ідуть першими).
+pub fn compare_commits(base: &str, rev: &str) -> Result<Verdict, Vec<String>> {
+    let base_raw = collect("база", base);
+    let target_raw = collect("ревізія", rev);
+    let (base_raw, target_raw) = match (base_raw, target_raw) {
+        (Ok(b), Ok(t)) => (b, t),
+        (b, t) => {
+            let mut errors = Vec::new();
+            errors.extend(b.err());
+            errors.extend(t.err());
+            return Err(errors);
+        }
+    };
 
+    let mut warnings = Vec::new();
+    let mut errors = Vec::new();
+    // Єдиний `.rs` у базі може не дійти до rustc (не читається чи не декодується), тому
+    // працездатність потрібного режиму перевіряється окремо, на коректному тексті.
+    let rust_ok = if base_raw.needs_rust() || target_raw.needs_rust() {
+        match check::probe_rust() {
+            Ok(()) => true,
+            Err(e) => {
+                errors.push(e.reason);
+                false
+            }
+        }
+    } else {
+        true
+    };
+    let base_side = analyze(&base_raw, rust_ok, &mut warnings, &mut errors);
+    let target_side = analyze(&target_raw, rust_ok, &mut warnings, &mut errors);
+    if !errors.is_empty() {
+        let mut lines = warnings;
+        lines.extend(errors);
+        return Err(lines);
+    }
+    let mut verdict = compare(&base_side, &target_side);
+    verdict.warnings = warnings;
+    Ok(verdict)
+}
+
+fn collect(label: &'static str, rev: &str) -> Result<Raw, String> {
+    let inv = git_tree::gate_inventory(rev).map_err(|e| format!("{label}: {e}"))?;
+    let contents = git_tree::read_contents(&inv.entries);
+    Ok(Raw {
+        label,
+        inv,
+        contents,
+    })
+}
+
+/// Причина відмови файла: помилка самого файла чи недоступність інструмента.
+struct Failure {
+    tool: bool,
+    reason: String,
+}
+
+fn analyze(
+    raw: &Raw,
+    rust_ok: bool,
+    warnings: &mut Vec<String>,
+    errors: &mut Vec<String>,
+) -> Side {
+    let is_base = raw.label == "база";
     // Один файл дає один запис незалежно від того, скільки умов його відхилили.
-    let mut errors: BTreeMap<Vec<u8>, String> = BTreeMap::new();
+    let mut failures: BTreeMap<Vec<u8>, Failure> = BTreeMap::new();
+    let mut fail = |key: &Vec<u8>, tool: bool, reason: String| {
+        let slot = failures.entry(key.clone());
+        match slot {
+            std::collections::btree_map::Entry::Vacant(v) => {
+                v.insert(Failure { tool, reason });
+            }
+            std::collections::btree_map::Entry::Occupied(mut o) => {
+                if tool && !o.get().tool {
+                    o.insert(Failure { tool, reason });
+                }
+            }
+        }
+    };
     let mut findings = Vec::new();
     let mut dup_keys = Vec::new();
     let mut dup_inputs = Vec::new();
-    for ((entry, selection), content) in inv.entries.iter().zip(&inv.selections).zip(contents) {
+    let rows = raw.inv.entries.iter().zip(&raw.inv.selections);
+    for ((entry, selection), content) in rows.zip(&raw.contents) {
         let key = &entry.path;
-        if let Err(reason) = check::commit_path(key) {
-            errors.entry(key.clone()).or_insert(reason);
+        // Для бази достатньо байтового ключа: неподатний шлях не заважає підрахунку.
+        if !is_base && let Err(reason) = check::commit_path(key) {
+            fail(key, false, reason);
         }
         if selection.check {
-            match &content {
+            match content {
+                Ok(_) if !rust_ok && check::uses_rust(key) => {}
                 Ok(bytes) => match check::check_bytes(key, bytes) {
                     Ok(positions) => {
                         findings.extend(positions.into_iter().map(|(rule, line)| Found {
@@ -67,40 +148,43 @@ fn load(label: &str, rev: &str) -> Result<Side, Vec<String>> {
                             line,
                         }))
                     }
-                    Err(e) => {
-                        errors.entry(key.clone()).or_insert(e.reason);
-                    }
+                    Err(e) => fail(key, e.kind == check::FailureKind::Tool, e.reason),
                 },
-                Err(e) => {
-                    errors.entry(key.clone()).or_insert(e.reason().to_string());
-                }
+                Err(e) => fail(key, false, e.reason().to_string()),
             }
         }
         if selection.dup {
             dup_keys.push(key.clone());
             dup_inputs.push(FileInput {
                 path: key.clone(),
-                content,
+                content: match content {
+                    Ok(b) => Ok(b.clone()),
+                    Err(_) => Err(git_tree::ReadError),
+                },
             });
         }
     }
     let dup = duplication_report::analyze(&dup_inputs);
     for (key, outcome) in dup_keys.iter().zip(&dup.files) {
         if let Err(reason) = outcome {
-            errors.entry(key.clone()).or_insert((*reason).to_string());
+            fail(key, false, (*reason).to_string());
         }
     }
-    if errors.is_empty() {
-        Ok(Side {
-            findings,
-            dup_keys,
-            dup,
-        })
-    } else {
-        Err(errors
-            .into_iter()
-            .map(|(key, reason)| format!("{label}: {}: {reason}", check::shown(&key)))
-            .collect())
+    for (key, f) in failures {
+        let name = check::shown(&key);
+        if is_base && !f.tool {
+            warnings.push(format!(
+                "попередження: {}: {name}: {} (файл бази: його внесок рахується за тим, що вдалося визначити)",
+                raw.label, f.reason
+            ));
+        } else {
+            errors.push(format!("{}: {name}: {}", raw.label, f.reason));
+        }
+    }
+    Side {
+        findings,
+        dup_keys,
+        dup,
     }
 }
 
@@ -159,6 +243,7 @@ fn compare(base: &Side, target: &Side) -> Verdict {
     Verdict {
         stdout: out,
         code: u8::from(failed),
+        warnings: Vec::new(),
     }
 }
 
