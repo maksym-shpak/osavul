@@ -35,10 +35,10 @@ pub const METRICS: Policy = Policy {
     skip_nested_dirs: &[],
 };
 
-/// Політика `check`: суфікси мов, які вже підтримують правила (поки лише `.rs`), вкладені теки
+/// Політика `check`: суфікси мов, які підтримують правила (`.ts` і `.rs`), вкладені теки
 /// `target` пропускаються.
 pub const CHECK: Policy = Policy {
-    suffixes: &[b".rs"],
+    suffixes: &[b".ts", b".rs"],
     skip_nested_dirs: &["target"],
 };
 

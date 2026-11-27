@@ -11,6 +11,7 @@ use crate::local_tree::{self, InputKind};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lang {
     Rust,
+    TypeScript,
 }
 
 /// Мовна реалізація: вміст одного файла й ім'я для режиму розбору → фізичні рядки від 1 (з
@@ -36,7 +37,13 @@ pub struct Finding {
 }
 
 fn language_of(key: &[u8]) -> Option<Lang> {
-    key.ends_with(b".rs").then_some(Lang::Rust)
+    if key.ends_with(b".rs") {
+        Some(Lang::Rust)
+    } else if key.ends_with(b".ts") {
+        Some(Lang::TypeScript)
+    } else {
+        None
+    }
 }
 
 /// Сортує за байтами шляху, номером рядка й ідентифікатором правила та формує текст звіту.
@@ -60,7 +67,9 @@ fn printed_path(arg: &str, kind: InputKind, key: &[u8]) -> Result<Vec<u8>, Strin
         if path.last() != Some(&b'/') && !sep_native {
             // «C:» + «/x» змінило б адресу з відносної в діску на кореневу.
             if cfg!(windows) && path.last() == Some(&b':') {
-                return Err("корінь із завершальним `:` не можна поєднати з відносним ключем".into());
+                return Err(
+                    "корінь із завершальним `:` не можна поєднати з відносним ключем".into(),
+                );
             }
             path.push(b'/');
         }
