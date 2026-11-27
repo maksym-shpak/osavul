@@ -85,7 +85,10 @@ pub fn inventory(rev: &str) -> Result<Inventory, String> {
     let mut cmd = git();
     cmd.args(["ls-tree", "-r", "-z", "--full-tree", &sha]);
     let listing = run(cmd, &format!("не вдалося прочитати дерево коміту {sha}"))?;
-    let entries = parse_listing(&listing)?;
+    let entries = parse_listing(&listing)?
+        .into_iter()
+        .filter(|e| e.path.ends_with(b".ts"))
+        .collect();
     Ok(Inventory { sha, entries })
 }
 
@@ -130,8 +133,9 @@ fn resolve_commit(rev: &str) -> Result<String, String> {
     Ok(sha)
 }
 
-/// Розбирає вивід `ls-tree -z`, лишаючи лише `blob` із режимами `100644` і `100755` та суфіксом
-/// `.ts`; результат відсортований за байтами шляху.
+/// Розбирає вивід `ls-tree -z`, лишаючи всі `blob` із режимами `100644` і `100755` (посилання й
+/// gitlink пропускаються); вибір за іменем лишається споживачеві. Результат відсортований за
+/// байтами шляху.
 fn parse_listing(listing: &[u8]) -> Result<Vec<Entry>, String> {
     let mut entries = Vec::new();
     for record in listing.split(|b| *b == 0).filter(|r| !r.is_empty()) {
@@ -144,7 +148,7 @@ fn parse_listing(listing: &[u8]) -> Result<Vec<Entry>, String> {
             (Some(m), Some(k), Some(o)) => (m, k, o),
             _ => return Err(bad()),
         };
-        if kind == "blob" && matches!(mode, "100644" | "100755") && path.ends_with(b".ts") {
+        if kind == "blob" && matches!(mode, "100644" | "100755") {
             entries.push(Entry {
                 path: path.to_vec(),
                 oid: oid.to_string(),

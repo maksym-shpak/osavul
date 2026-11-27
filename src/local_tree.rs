@@ -46,6 +46,22 @@ impl Policy {
         self.suffixes.iter().any(|s| key.ends_with(s))
     }
 
+    /// Чи пропускається тека з цим іменем під час обходу вкладених тек.
+    fn skips_dir(&self, name: &[u8]) -> bool {
+        EXCLUDED.iter().any(|x| x.as_bytes() == name)
+            || self.skip_nested_dirs.iter().any(|x| x.as_bytes() == name)
+    }
+
+    /// Відбір кореневого ключа (`a/b.ts`): суфікс і жодної виключеної теки серед цілих компонентів
+    /// шляху. Збігається з обходом `select` для вкладених файлів.
+    // Споживач — відбір gate з Git-дерева та диска (наступні частини).
+    #[allow(dead_code)]
+    pub fn selects_key(&self, key: &[u8]) -> bool {
+        let mut parts = key.split(|b| *b == b'/');
+        let _file = parts.next_back();
+        self.accepts(key) && !parts.any(|dir| self.skips_dir(dir))
+    }
+
     fn describe(&self) -> String {
         let list: Vec<String> = self
             .suffixes
@@ -119,7 +135,7 @@ pub fn select(root: &Path, policy: &Policy) -> Result<(InputKind, Vec<Selected>)
             let mut key = prefix.clone();
             key.extend(os_bytes(&name));
             if ty.is_dir() {
-                if policy.skip_nested_dirs.iter().any(|x| name == *x) {
+                if policy.skips_dir(&os_bytes(&name)) {
                     continue;
                 }
                 key.push(b'/');
@@ -281,6 +297,26 @@ mod tests {
         );
         assert!(select(&root.join("alias.txt"), &METRICS).is_err());
         assert_eq!(keys(&root.join("bad.ts")), ["bad.ts"]);
+    }
+
+    // Виявляє розбіжність відбору ключів з обходом: цілі компоненти, різна глибина, роль `target`.
+    #[test]
+    fn key_selection_uses_whole_directory_components() {
+        let both = [(&CHECK, true), (&METRICS, false)];
+        let sel = |p: &Policy, k: &str| p.selects_key(k.as_bytes());
+        for (policy, _) in both {
+            assert!(sel(policy, "a.ts") && sel(policy, "types.d.ts"));
+            assert!(sel(policy, "my.git/a.ts") && sel(policy, "node_modules2/a.ts"));
+            assert!(sel(policy, "x/.github/a.ts"));
+            for k in [".git/a.ts", "x/.git/a.ts", "node_modules/a.ts", "a/node_modules/b/c.ts"] {
+                assert!(!sel(policy, k), "{k}");
+            }
+            assert!(!sel(policy, "a.tsx") && !sel(policy, "A.TS"));
+        }
+        assert!(sel(&CHECK, "x.rs") && !sel(&METRICS, "x.rs"));
+        assert!(!sel(&CHECK, "target/a.ts") && !sel(&CHECK, "deep/target/b.rs"));
+        assert!(sel(&METRICS, "target/a.ts") && sel(&METRICS, "deep/target/a.ts"));
+        assert!(sel(&CHECK, "target.rs") && sel(&CHECK, "mytarget/a.ts"));
     }
 
     #[test]
