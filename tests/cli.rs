@@ -380,7 +380,10 @@ fn isolate(cmd: &mut Command, home: &Path) {
     // Порожній файл замість `/dev/null`, якого на Windows немає.
     let empty_config = home.join("empty-gitconfig");
     fs::write(&empty_config, b"").unwrap();
-    cmd.env("HOME", home)
+    // Тимчасові теки лежать у `target/` всередині репозиторію Осавула: без межі Git із теки в `home`
+    // знайшов би його.
+    cmd.env("GIT_CEILING_DIRECTORIES", home)
+        .env("HOME", home)
         .env("XDG_CONFIG_HOME", home)
         .env("GIT_CONFIG_GLOBAL", &empty_config)
         .env("GIT_CONFIG_NOSYSTEM", "1")
