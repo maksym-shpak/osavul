@@ -380,10 +380,7 @@ fn isolate(cmd: &mut Command, home: &Path) {
     // Порожній файл замість `/dev/null`, якого на Windows немає.
     let empty_config = home.join("empty-gitconfig");
     fs::write(&empty_config, b"").unwrap();
-    // Тимчасові теки лежать у `target/` всередині репозиторію Осавула: без межі Git із теки в `home`
-    // знайшов би його.
-    cmd.env("GIT_CEILING_DIRECTORIES", home)
-        .env("HOME", home)
+    cmd.env("HOME", home)
         .env("XDG_CONFIG_HOME", home)
         .env("GIT_CONFIG_GLOBAL", &empty_config)
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -2320,13 +2317,16 @@ fn gate_broken_file_or_bad_revision_is_fatal_with_all_reasons() {
     repo.write("t.test.ts", EMPTY_TS.as_bytes());
     repo.write("bad1.ts", b"function (");
     repo.write("bad2.ts", b"const = ;");
-    repo.write("odd\nname.ts", b"let a = 1;\n");
+    write_newline_name(&repo);
     let rev = repo.commit("broken");
     let out = gate(&repo, &repo.root, &base, &rev);
     assert_eq!(out.status.code(), Some(2));
     assert!(out.stdout.is_empty());
     let err = String::from_utf8(out.stderr).unwrap();
-    for name in ["bad1.ts", "bad2.ts", "odd"] {
+    for name in ["bad1.ts", "bad2.ts"]
+        .into_iter()
+        .chain(cfg!(unix).then_some("odd"))
+    {
         assert!(err.contains("ревізія: ") && err.contains(name), "{err}");
     }
     let unknown = gate(&repo, &repo.root, &base, "no-such-rev");
@@ -2357,6 +2357,13 @@ fn gate_stdout_write_failure_is_fatal() {
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("не вдалося записати звіт: "), "{stderr}");
+}
+
+/// Файл із переведенням рядка в імені: звіт мусить узяти таке ім'я в лапки. Windows його не створює.
+fn write_newline_name(repo: &Repo) {
+    if cfg!(unix) {
+        repo.write("odd\nname.ts", b"let a = 1;\n");
+    }
 }
 
 fn stderr_of(out: &Output) -> String {
@@ -2456,14 +2463,18 @@ fn gate_target_errors_beat_violation_and_name_every_file_with_base_warning() {
     repo.write("t.test.ts", EMPTY_TS.as_bytes());
     repo.write("bad1.ts", b"const = ;");
     repo.write("bad2.ts", b"function (");
-    repo.write("odd\nname.ts", b"let a = 1;\n");
+    write_newline_name(&repo);
     let rev = repo.commit("worse");
     let out = gate(&repo, &repo.root, &base, &rev);
     assert_eq!(out.status.code(), Some(2));
     assert!(out.stdout.is_empty());
     let err = stderr_of(&out);
     assert!(err.contains("попередження: база: broken.ts"), "{err}");
-    for name in ["ревізія: bad1.ts", "ревізія: bad2.ts", "ревізія: \"odd"] {
+    let odd = cfg!(unix).then_some("ревізія: \"odd");
+    for name in ["ревізія: bad1.ts", "ревізія: bad2.ts"]
+        .into_iter()
+        .chain(odd)
+    {
         assert!(err.contains(name), "{err}");
     }
 }
@@ -2787,12 +2798,16 @@ fn gate_path_target_errors_name_every_file_and_beat_violation() {
     repo.write("t.test.ts", EMPTY_TS.as_bytes());
     repo.write("bad1.ts", b"function (");
     repo.write("bad2.ts", b"const = ;");
-    repo.write("odd\nname.ts", b"let a = 1;\n");
+    write_newline_name(&repo);
     let out = gate_path(&repo, &repo.root, &base, ".");
     assert_eq!(out.status.code(), Some(2));
     assert!(out.stdout.is_empty());
     let err = stderr_of(&out);
-    for name in ["ревізія: bad1.ts", "ревізія: bad2.ts", "ревізія: \"odd"] {
+    let odd = cfg!(unix).then_some("ревізія: \"odd");
+    for name in ["ревізія: bad1.ts", "ревізія: bad2.ts"]
+        .into_iter()
+        .chain(odd)
+    {
         assert!(err.contains(name), "{err}");
     }
 }

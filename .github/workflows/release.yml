@@ -36,7 +36,7 @@ jobs:
         run: |
           mkdir dist
           archive="osavul-$LABEL-$TARGET.tar.gz"
-          tar -czf "dist/$archive" -C "target/$TARGET/release" osavul
+          tar -czf "dist/$archive" -C "target/$TARGET/release" osavul -C "$GITHUB_WORKSPACE" LICENSE-APACHE LICENSE-MIT
           cd dist
           sha256sum "$archive" > SHA256SUMS
       - name: Run the packaged binary
