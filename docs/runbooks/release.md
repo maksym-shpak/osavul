@@ -1,6 +1,6 @@
 # Runbook: Реліз
 
-Для того, хто випускає версію й ставить її на сервер. Рішення й межі — в [ADR-0004](../architecture/decisions/0004-ci-and-releases.md).
+Для того, хто випускає версію й ставить її на сервер. Рішення й межі — в [ADR-0007](../architecture/decisions/0007-release-build-on-ubuntu-24-04.md).
 
 ## Випуск
 

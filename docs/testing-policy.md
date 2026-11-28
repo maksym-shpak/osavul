@@ -92,7 +92,7 @@ manifest чи реєстру немає: людина перевіряє пок�
 - Кореневий `.gitattributes` (`* text=auto eol=lf`) робить текстові файли й фікстури в робочій копії LF незалежно від
   `core.autocrlf` і `core.eol`. Приклади з CRLF, BOM чи невалідними байтами тести формують під час виконання; фікстуру
   з навмисними особливими байтами захищають від перетворення окремим правилом (`-text`).
-- CI ([ADR-0004](architecture/decisions/0004-ci-and-releases.md)) на кожному pull request і push у `main` запускає
+- CI ([ADR-0007](architecture/decisions/0007-release-build-on-ubuntu-24-04.md)) на кожному pull request і push у `main` запускає
   `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` і `cargo test` лише на Ubuntu; решту цілей він не
   перевіряє. Блокування злиття за цими перевірками не входить у workflow й залежить від захисту гілки на GitHub.
 - Вимірювання швидкості й порівняння з іншими інструментами не входять у набір. Їхні результати з датою,
