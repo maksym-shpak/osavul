@@ -147,12 +147,7 @@ struct Failure {
     reason: String,
 }
 
-fn analyze(
-    raw: &Raw,
-    rust_ok: bool,
-    warnings: &mut Vec<String>,
-    errors: &mut Vec<String>,
-) -> Side {
+fn analyze(raw: &Raw, rust_ok: bool, warnings: &mut Vec<String>, errors: &mut Vec<String>) -> Side {
     let is_base = raw.label == "база";
     // Один файл дає один запис незалежно від того, скільки умов його відхилили.
     let mut failures: BTreeMap<Vec<u8>, Failure> = BTreeMap::new();
