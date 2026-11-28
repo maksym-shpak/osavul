@@ -60,6 +60,9 @@
 [ADR-0003](docs/architecture/decisions/0003-target-platforms.md), команди перевірки — у
 [політиці тестування](docs/testing-policy.md#платформи-й-перевірка-цілей).
 
+Готові релізи збираються поки лише для Ubuntu 26.04 (x86_64): як випустити й перевірити — у
+[runbook релізу](docs/runbooks/release.md).
+
 ## Доступна команда
 
 ```sh
