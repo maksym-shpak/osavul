@@ -380,7 +380,10 @@ fn isolate(cmd: &mut Command, home: &Path) {
     // Порожній файл замість `/dev/null`, якого на Windows немає.
     let empty_config = home.join("empty-gitconfig");
     fs::write(&empty_config, b"").unwrap();
-    cmd.env("HOME", home)
+    // Тимчасові теки лежать у `target/` всередині репозиторію Осавула: без межі Git із теки в `home`
+    // знайшов би його.
+    cmd.env("GIT_CEILING_DIRECTORIES", home)
+        .env("HOME", home)
         .env("XDG_CONFIG_HOME", home)
         .env("GIT_CONFIG_GLOBAL", &empty_config)
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -2383,10 +2386,7 @@ fn gate_fixing_broken_base_file_passes_with_base_warning() {
         "empty-test: пройдено: було 0, стало 0\nduplication: пройдено: було 0, стало 0\ngate: пройдено\n"
     );
     let err = stderr_of(&out);
-    assert!(
-        err.contains("база") && err.contains("broken.ts"),
-        "{err}"
-    );
+    assert!(err.contains("база") && err.contains("broken.ts"), "{err}");
     // Зламаний файл у ревізії — завжди 2.
     assert_eq!(gate(&repo, &repo.root, &rev, &base).status.code(), Some(2));
 }
@@ -2404,9 +2404,14 @@ fn gate_base_warning_write_failure_is_fatal() {
     assert_eq!(control.status.code(), Some(0), "{}", stderr_of(&control));
     assert!(stderr_of(&control).contains("broken.ts"));
 
-    let full = fs::OpenOptions::new().write(true).open("/dev/full").unwrap();
+    let full = fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_osavul"));
-    cmd.args(["gate", &base, &rev]).current_dir(&repo.root).stderr(full);
+    cmd.args(["gate", &base, &rev])
+        .current_dir(&repo.root)
+        .stderr(full);
     isolate(&mut cmd, &repo.home);
     let out = cmd.output().unwrap();
     assert_eq!(out.status.code(), Some(2));
@@ -2435,7 +2440,10 @@ fn gate_partial_base_keeps_known_duplication_sum() {
     let out = gate(&repo, &repo.root, &base, &worse);
     assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
     let text = stdout_of(&out);
-    assert!(text.contains("duplication: не пройдено: було 30, стало 45\n"), "{text}");
+    assert!(
+        text.contains("duplication: не пройдено: було 30, стало 45\n"),
+        "{text}"
+    );
     assert!(text.contains("d.ts:1-15: duplication: група 1\n"), "{text}");
     assert!(stderr_of(&out).contains("c.ts"));
 }
@@ -2469,7 +2477,11 @@ fn gate_without_rustc(repo: &Repo, base: &str, rev: &str) -> Output {
 /// Те саме, але з підставним `rustc`-скриптом (текст сценарію `sh`).
 #[cfg(unix)]
 fn gate_with_tools(repo: &Repo, base: &str, rev: &str, rustc: Option<&str>) -> Output {
-    let bin = repo.home.join(if rustc.is_some() { "git-fake" } else { "git-only" });
+    let bin = repo.home.join(if rustc.is_some() {
+        "git-fake"
+    } else {
+        "git-only"
+    });
     fs::create_dir_all(&bin).unwrap();
     let git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
         .map(|d| d.join("git"))
@@ -2731,8 +2743,14 @@ fn gate_path_keeps_ordinary_fixture_shaped_like_git_layout() {
     let out = gate_path(&repo, &repo.root, &base, ".");
     assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
     let text = stdout_of(&out);
-    assert!(text.contains("empty-test: не пройдено: було 0, стало 1\n"), "{text}");
-    assert!(text.contains(&format!("./fx/parser.test.ts:2: empty-test: {MSG}\n")), "{text}");
+    assert!(
+        text.contains("empty-test: не пройдено: було 0, стало 1\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("./fx/parser.test.ts:2: empty-test: {MSG}\n")),
+        "{text}"
+    );
 }
 
 #[cfg(unix)]
@@ -2750,9 +2768,15 @@ fn gate_path_skips_symlinks_and_files_below_symlinked_directories() {
     let out = gate_path(&repo, &repo.root, &base, ".");
     assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
     let text = stdout_of(&out);
-    assert!(text.contains("empty-test: не пройдено: було 0, стало 1\n"), "{text}");
+    assert!(
+        text.contains("empty-test: не пройдено: було 0, стало 1\n"),
+        "{text}"
+    );
     assert!(text.contains(&format!("./real/inner.test.ts:2: empty-test: {MSG}\n")));
-    assert!(!text.contains("dirlink") && !text.contains("alias"), "{text}");
+    assert!(
+        !text.contains("dirlink") && !text.contains("alias"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -2834,8 +2858,16 @@ fn gate_path_incomplete_untracked_listing_is_fatal_despite_git_success() {
     let out = run();
     assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
     assert!(out.stdout.is_empty());
-    assert!(stderr_of(&out).contains("невідстежуваних"), "{}", stderr_of(&out));
-    assert!(stderr_of(&out).contains("archived.ts"), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("невідстежуваних"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(
+        stderr_of(&out).contains("archived.ts"),
+        "{}",
+        stderr_of(&out)
+    );
 }
 
 /// Відносні GIT_DIR і GIT_WORK_TREE діють від теки запуску: перелік не має «переїжджати» в корінь.
@@ -2930,7 +2962,11 @@ fn gate_path_accepts_non_utf8_worktree_root_argument() {
     let dot = gate_path(&repo, &repo.root, &base, ".");
     assert_eq!(dot.status.code(), Some(1), "{}", stderr_of(&dot));
     let line = format!("t.test.ts:2: empty-test: {MSG}\n");
-    assert!(dot.stdout.windows(line.len() + 2).any(|w| w == format!("./{line}").as_bytes()));
+    assert!(
+        dot.stdout
+            .windows(line.len() + 2)
+            .any(|w| w == format!("./{line}").as_bytes())
+    );
 
     let mut arg = b"../".to_vec();
     arg.extend_from_slice(b"repo\xff");
@@ -2944,5 +2980,9 @@ fn gate_path_accepts_non_utf8_worktree_root_argument() {
     let mut expected = arg.clone();
     expected.push(b'/');
     expected.extend_from_slice(line.as_bytes());
-    assert!(out.stdout.windows(expected.len()).any(|w| w == expected.as_slice()));
+    assert!(
+        out.stdout
+            .windows(expected.len())
+            .any(|w| w == expected.as_slice())
+    );
 }

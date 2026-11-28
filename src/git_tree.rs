@@ -226,7 +226,15 @@ pub fn worktree_inventory(arg: &std::path::Path) -> Result<WorktreeInventory, St
         "не вдалося отримати перелік відстежуваних файлів",
     )?;
     let untracked = listing(
-        &["ls-files", "-z", "--others", "--exclude-standard", "--full-name", "--", ":/"],
+        &[
+            "ls-files",
+            "-z",
+            "--others",
+            "--exclude-standard",
+            "--full-name",
+            "--",
+            ":/",
+        ],
         "не вдалося отримати перелік невідстежуваних файлів",
     )?;
     // true — запис не є звичайним файлом за режимом індексу. Посилання (120000) тут виняток лише
@@ -258,7 +266,9 @@ pub fn worktree_inventory(arg: &std::path::Path) -> Result<WorktreeInventory, St
             check: local_tree::CHECK.selects_key(&key),
             dup: local_tree::METRICS.selects_key(&key),
         };
-        if skip || !(selection.check || selection.dup) || !local_tree::is_plain_file(&inv.root, &key)
+        if skip
+            || !(selection.check || selection.dup)
+            || !local_tree::is_plain_file(&inv.root, &key)
         {
             continue;
         }
