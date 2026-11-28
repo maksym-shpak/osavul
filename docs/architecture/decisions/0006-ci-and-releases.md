@@ -1,5 +1,5 @@
-# ADR-0004: CI й релізи в GitHub Actions
-Статус: `Accepted`
+# ADR-0006: CI й релізи в GitHub Actions
+Статус: `Superseded by ADR-0007`
 
 ## Контекст
 
